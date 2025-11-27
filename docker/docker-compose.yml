@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  dvr-tuner1:
+    container_name: dvr-tuner1
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: dvr-tuner1
+    restart: unless-stopped
+    shm_size: '2gb'
+    networks:
+      br0:
+        ipv4_address: 192.168.1.92
+    volumes:
+      - /mnt/user/appdata/dvr-tuner1:/data
+    environment:
+      - TZ=America/New_York
+      - DISPLAY=:1
+      - DVR_NUM_TUNERS=1
+      - DVR_PORT=7070
+      - CHROME_DEBUG_PORT=9222
+
+networks:
+  br0:
+    external: true
+    driver: macvlan
+    driver_opts:
+      parent: br0

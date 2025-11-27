@@ -1,0 +1,23 @@
+{
+  "name": "dvr-player",
+  "version": "1.0.0",
+  "description": "DirecTV IPTV Proxy Server - Stream DRM content via HLS",
+  "main": "stream-proxy.js",
+  "scripts": {
+    "start": "node stream-proxy.js",
+    "dev": "DVR_NUM_TUNERS=1 node stream-proxy.js",
+    "electron": "electron .",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "electron": "github:castlabs/electron-releases#v33.0.0+wvcus",
+    "electron-builder": "^24.13.3"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "node-fetch": "^2.7.0",
+    "playwright": "^1.57.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}

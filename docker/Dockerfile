@@ -1,0 +1,100 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV DISPLAY=:1
+ENV VNC_PORT=5901
+ENV NOVNC_PORT=6080
+ENV CHROME_DEBUG_PORT=9222
+ENV DVR_PORT=7070
+
+# Install base packages
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    gnupg2 \
+    ca-certificates \
+    xvfb \
+    x11vnc \
+    fluxbox \
+    supervisor \
+    net-tools \
+    procps \
+    git \
+    python3 \
+    python3-pip \
+    ffmpeg \
+    pulseaudio \
+    unclutter \
+    dbus-x11 \
+    xdg-utils \
+    libgconf-2-4 \
+    libnss3 \
+    libxss1 \
+    libasound2 \
+    fonts-liberation \
+    libappindicator3-1 \
+    libgbm1 \
+    libgtk-3-0 \
+    libx11-xcb1 \
+    libxcb-dri3-0 \
+    libdrm2 \
+    libxshmfence1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20.x
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Google Chrome
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install noVNC
+RUN git clone https://github.com/novnc/noVNC.git /opt/novnc \
+    && git clone https://github.com/novnc/websockify.git /opt/novnc/utils/websockify \
+    && ln -s /opt/novnc/vnc.html /opt/novnc/index.html
+
+# Create app directory
+WORKDIR /app
+
+# Copy application files
+COPY app/ /app/
+
+# Install Node dependencies
+RUN npm install
+
+# Create Chrome profile directory
+RUN mkdir -p /data/chrome-profile
+
+# Create supervisor config
+RUN mkdir -p /var/log/supervisor
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Create startup scripts
+COPY start-xvfb.sh /usr/local/bin/start-xvfb.sh
+COPY start-chrome.sh /usr/local/bin/start-chrome.sh
+COPY start-vnc.sh /usr/local/bin/start-vnc.sh
+COPY start-novnc.sh /usr/local/bin/start-novnc.sh
+COPY start-dvr.sh /usr/local/bin/start-dvr.sh
+COPY start-pulseaudio.sh /usr/local/bin/start-pulseaudio.sh
+RUN chmod +x /usr/local/bin/*.sh
+
+# Configure PulseAudio for system-wide mode
+RUN mkdir -p /var/run/pulse && \
+    adduser root pulse-access 2>/dev/null || true
+
+# Expose ports
+# 5901 - VNC
+# 6080 - noVNC web interface
+# 9222 - Chrome remote debugging
+# 7070 - DVR proxy server
+EXPOSE 5901 6080 9222 7070
+
+# Volume for persistent Chrome profile and HLS streams
+VOLUME ["/data"]
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
