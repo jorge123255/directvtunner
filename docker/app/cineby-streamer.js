@@ -1,198 +1,286 @@
-// Cineby Stream Extractor
-// Navigates to Cineby movie page, extracts the HLS stream URL via network interception
-// Returns the direct stream URL for native playback in TvMate/VLC (supports pause/rewind!)
+// Cineby Stream Extractor - Browser-based Network Interception
+// Uses Playwright to connect to existing Chrome, navigate to movie, and capture m3u8 URL
+// The m3u8 URL is requested AFTER client-side decryption happens
 
 const { chromium } = require('playwright');
-const { getMovie, getCinebyUrl } = require('./cineby-movies');
+const { getMovie } = require('./cineby-movies');
 
 const DEBUG_PORT = process.env.CHROME_DEBUG_PORT || 9222;
+const CINEBY_BASE = 'https://www.cineby.gd';
 
-// Cache for extracted stream URLs (they may expire, so cache with TTL)
+// Cache for extracted stream URLs
 const streamCache = new Map();
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
-class CinebyStreamer {
-  constructor() {
-    this.browser = null;
-    this.page = null;
-    this.isExtracting = false;
-    this.extractionQueue = [];
+// Pattern to match m3u8 URLs from Cineby's CDN
+const M3U8_PATTERNS = [
+  /tasteful-wire\.workers\.dev.*\.m3u8/,
+  /cloudspark.*\.m3u8/,
+  /megafiles\.store.*\.m3u8/,
+  /\.m3u8(\?|$)/,
+];
+
+// Extract stream URL by navigating to movie page and intercepting m3u8 request
+async function extractStreamUrl(movieId) {
+  // Try to get movie from catalog
+  let movie = getMovie(movieId);
+  let tmdbId = movieId;
+  let movieTitle = `TMDB:${movieId}`;
+
+  if (movie) {
+    tmdbId = movie.tmdbId;
+    movieTitle = movie.title;
   }
 
-  async connect() {
-    if (this.browser) return;
+  // Check cache first
+  const cached = streamCache.get(tmdbId);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    console.log(`[cineby] Using cached stream URL for ${movieTitle}`);
+    return cached.url;
+  }
 
-    console.log('[cineby] Connecting to Chrome on port', DEBUG_PORT);
-    this.browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
-    const contexts = this.browser.contexts();
+  console.log(`[cineby] Extracting stream URL for: ${movieTitle} (TMDB: ${tmdbId})`);
+
+  let browser;
+  let page;
+  let m3u8Url = null;
+
+  try {
+    // Connect to existing Chrome instance via CDP
+    browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
+    const contexts = browser.contexts();
     const context = contexts[0];
 
-    // Try to find existing Cineby tab or create new one
-    const pages = context.pages();
-    this.page = pages.find(p => p.url().includes('cineby.gd')) || pages[0];
+    // Create a new page for movie extraction
+    page = await context.newPage();
 
-    console.log('[cineby] Connected, current page:', this.page.url());
-  }
+    console.log(`[cineby] Created new page for movie extraction`);
 
-  async disconnect() {
-    if (this.browser) {
-      this.browser.disconnect();
-      this.browser = null;
-      this.page = null;
-    }
-  }
+    // Set up network interception to capture m3u8 URL
+    const m3u8Promise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Timeout waiting for m3u8 URL (30s)'));
+      }, 30000);
 
-  // Extract the HLS/MP4 stream URL from a Cineby movie page
-  async extractStreamUrl(movieId) {
-    const movie = getMovie(movieId);
-    if (!movie) {
-      throw new Error(`Movie not found: ${movieId}`);
-    }
+      page.on('request', (request) => {
+        const url = request.url();
 
-    // Check cache first
-    const cached = streamCache.get(movieId);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      console.log(`[cineby] Using cached stream URL for ${movie.title}`);
-      return cached.url;
-    }
-
-    // Queue extraction if already in progress
-    if (this.isExtracting) {
-      return new Promise((resolve, reject) => {
-        this.extractionQueue.push({ movieId, resolve, reject });
-      });
-    }
-
-    this.isExtracting = true;
-
-    try {
-      await this.connect();
-
-      const cinebyUrl = movie.cinebyUrl;
-      console.log(`[cineby] Extracting stream URL for: ${movie.title}`);
-      console.log(`[cineby] Navigating to: ${cinebyUrl}`);
-
-      let streamUrl = null;
-
-      // Set up network interception to capture the HLS/MP4 URL
-      const streamPromise = new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Timeout waiting for stream URL'));
-        }, 30000);
-
-        const handleRequest = (request) => {
-          const url = request.url();
-
-          // Look for HLS manifest (.m3u8) or direct video (.mp4)
-          if (url.includes('.m3u8') && !url.includes('cineby.gd')) {
-            console.log(`[cineby] Found HLS stream: ${url.substring(0, 100)}...`);
+        // Check if this is an m3u8 request
+        for (const pattern of M3U8_PATTERNS) {
+          if (pattern.test(url)) {
+            console.log(`[cineby] Found m3u8: ${url.substring(0, 100)}...`);
             clearTimeout(timeout);
-            this.page.off('request', handleRequest);
             resolve(url);
-          } else if (url.includes('.mp4') && url.includes('http') && !url.includes('poster')) {
-            console.log(`[cineby] Found MP4 stream: ${url.substring(0, 100)}...`);
-            clearTimeout(timeout);
-            this.page.off('request', handleRequest);
-            resolve(url);
-          }
-        };
-
-        this.page.on('request', handleRequest);
-      });
-
-      // Navigate to the movie page
-      await this.page.goto(cinebyUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-
-      // Wait for video player to load and click play if needed
-      await this.page.waitForTimeout(2000);
-
-      // Try to click play button if video isn't playing
-      try {
-        // Common play button selectors
-        const playSelectors = [
-          'button[aria-label="Play"]',
-          '.play-button',
-          '.vjs-big-play-button',
-          '[class*="play"]',
-          'video'
-        ];
-
-        for (const selector of playSelectors) {
-          const element = await this.page.$(selector);
-          if (element) {
-            await element.click().catch(() => {});
-            console.log(`[cineby] Clicked: ${selector}`);
-            break;
+            return;
           }
         }
+      });
+
+      // Also check responses for m3u8 content-type
+      page.on('response', async (response) => {
+        const url = response.url();
+        const contentType = response.headers()['content-type'] || '';
+
+        if (contentType.includes('mpegurl') || contentType.includes('m3u8')) {
+          console.log(`[cineby] Found m3u8 via content-type: ${url.substring(0, 100)}...`);
+          clearTimeout(timeout);
+          resolve(url);
+        }
+      });
+    });
+
+    // Navigate to movie page with ?play=true to auto-start playback
+    const movieUrl = `${CINEBY_BASE}/movie/${tmdbId}?play=true`;
+    console.log(`[cineby] Navigating to: ${movieUrl}`);
+
+    await page.goto(movieUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 20000
+    });
+
+    // Click the play button if it exists (in case auto-play didn't work)
+    try {
+      const playButton = page.locator('#ButtonPlay, [data-testid="play-button"], button:has-text("Play")').first();
+      if (await playButton.isVisible({ timeout: 3000 })) {
+        console.log(`[cineby] Clicking play button`);
+        await playButton.click();
+      }
+    } catch (e) {
+      // Play button might not exist or video might auto-play
+      console.log(`[cineby] No play button found or already playing`);
+    }
+
+    // Wait for m3u8 URL to be captured
+    m3u8Url = await m3u8Promise;
+
+    console.log(`[cineby] Successfully captured m3u8 URL`);
+
+    // Cache the URL
+    streamCache.set(tmdbId, {
+      url: m3u8Url,
+      timestamp: Date.now(),
+      title: movieTitle
+    });
+
+    return m3u8Url;
+
+  } catch (error) {
+    console.error(`[cineby] Error extracting stream:`, error.message);
+    throw error;
+  } finally {
+    // Close the page we created
+    if (page) {
+      try {
+        await page.close();
+        console.log(`[cineby] Closed extraction page`);
       } catch (e) {
-        console.log('[cineby] Could not find/click play button, video may auto-play');
-      }
-
-      // Wait for stream URL from network interception
-      streamUrl = await streamPromise;
-
-      // Cache the URL
-      streamCache.set(movieId, {
-        url: streamUrl,
-        timestamp: Date.now(),
-        title: movie.title
-      });
-
-      console.log(`[cineby] Successfully extracted stream for ${movie.title}`);
-
-      return streamUrl;
-
-    } catch (error) {
-      console.error(`[cineby] Error extracting stream:`, error.message);
-      throw error;
-    } finally {
-      this.isExtracting = false;
-
-      // Process queue
-      if (this.extractionQueue.length > 0) {
-        const next = this.extractionQueue.shift();
-        this.extractStreamUrl(next.movieId)
-          .then(next.resolve)
-          .catch(next.reject);
+        // Page might already be closed
       }
     }
-  }
-
-  // Get cached stream URL if available
-  getCachedUrl(movieId) {
-    const cached = streamCache.get(movieId);
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      return cached.url;
-    }
-    return null;
-  }
-
-  // Clear cache for a movie
-  clearCache(movieId) {
-    if (movieId) {
-      streamCache.delete(movieId);
-    } else {
-      streamCache.clear();
-    }
-  }
-
-  // Get all cached entries
-  getCacheStatus() {
-    const entries = [];
-    for (const [movieId, data] of streamCache) {
-      entries.push({
-        movieId,
-        title: data.title,
-        age: Math.round((Date.now() - data.timestamp) / 1000),
-        expired: Date.now() - data.timestamp >= CACHE_TTL
-      });
-    }
-    return entries;
+    // Don't close browser - it's shared CDP connection
   }
 }
 
-// Singleton instance
-const cinebyStreamer = new CinebyStreamer();
+// Alternative extraction using existing page (for when there's already a Chrome with Cineby open)
+async function extractStreamUrlFromExistingPage(movieId) {
+  let movie = getMovie(movieId);
+  let tmdbId = movieId;
+  let movieTitle = `TMDB:${movieId}`;
 
-module.exports = cinebyStreamer;
+  if (movie) {
+    tmdbId = movie.tmdbId;
+    movieTitle = movie.title;
+  }
+
+  // Check cache first
+  const cached = streamCache.get(tmdbId);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    console.log(`[cineby] Using cached stream URL for ${movieTitle}`);
+    return cached.url;
+  }
+
+  console.log(`[cineby] Extracting via existing page for: ${movieTitle} (TMDB: ${tmdbId})`);
+
+  let browser;
+
+  try {
+    browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
+    const contexts = browser.contexts();
+    const context = contexts[0];
+    const pages = context.pages();
+
+    // Find an existing Cineby page
+    let page = pages.find(p => p.url().includes('cineby.gd'));
+
+    if (!page) {
+      // Fall back to creating a new page
+      console.log(`[cineby] No existing Cineby page found, creating new one`);
+      return extractStreamUrl(movieId);
+    }
+
+    console.log(`[cineby] Using existing Cineby page: ${page.url()}`);
+
+    // Set up network interception
+    const m3u8Promise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Timeout waiting for m3u8 URL (30s)'));
+      }, 30000);
+
+      const handler = (request) => {
+        const url = request.url();
+        for (const pattern of M3U8_PATTERNS) {
+          if (pattern.test(url)) {
+            console.log(`[cineby] Found m3u8: ${url.substring(0, 100)}...`);
+            clearTimeout(timeout);
+            page.off('request', handler);
+            resolve(url);
+            return;
+          }
+        }
+      };
+
+      page.on('request', handler);
+    });
+
+    // Navigate to the movie
+    const movieUrl = `${CINEBY_BASE}/movie/${tmdbId}?play=true`;
+    console.log(`[cineby] Navigating to: ${movieUrl}`);
+
+    await page.goto(movieUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 20000
+    });
+
+    // Try to click play button
+    try {
+      const playButton = page.locator('#ButtonPlay, [data-testid="play-button"], button:has-text("Play")').first();
+      if (await playButton.isVisible({ timeout: 3000 })) {
+        console.log(`[cineby] Clicking play button`);
+        await playButton.click();
+      }
+    } catch (e) {
+      console.log(`[cineby] No play button found or already playing`);
+    }
+
+    // Wait for m3u8
+    const m3u8Url = await m3u8Promise;
+
+    // Cache it
+    streamCache.set(tmdbId, {
+      url: m3u8Url,
+      timestamp: Date.now(),
+      title: movieTitle
+    });
+
+    return m3u8Url;
+
+  } catch (error) {
+    console.error(`[cineby] Error extracting stream:`, error.message);
+    throw error;
+  }
+}
+
+// Get cached stream URL if available
+function getCachedUrl(movieId) {
+  const movie = getMovie(movieId);
+  const tmdbId = movie ? movie.tmdbId : movieId;
+
+  const cached = streamCache.get(tmdbId);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.url;
+  }
+  return null;
+}
+
+// Clear cache for a movie
+function clearCache(movieId) {
+  if (movieId) {
+    const movie = getMovie(movieId);
+    const tmdbId = movie ? movie.tmdbId : movieId;
+    streamCache.delete(tmdbId);
+  } else {
+    streamCache.clear();
+  }
+}
+
+// Get all cached entries
+function getCacheStatus() {
+  const entries = [];
+  for (const [movieId, data] of streamCache) {
+    entries.push({
+      movieId,
+      title: data.title,
+      age: Math.round((Date.now() - data.timestamp) / 1000),
+      expired: Date.now() - data.timestamp >= CACHE_TTL
+    });
+  }
+  return entries;
+}
+
+module.exports = {
+  extractStreamUrl,
+  extractStreamUrlFromExistingPage,
+  getCachedUrl,
+  clearCache,
+  getCacheStatus
+};
