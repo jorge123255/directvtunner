@@ -23,9 +23,16 @@ A Docker-based IPTV proxy that turns DirecTV Stream into an M3U playlist compati
 - **VOD with Pause/Rewind**: Native HLS playback support
 - **Direct API Integration**: Uses CinemaOS scraper API for stream URLs
 
+### Cineby TV Shows (3,000+ Shows) - NEW!
+- **Extensive TV Library**: 3,000+ TV shows from TMDB
+- **Auto-refresh Database**: Automatically scans for new shows every 1 hour
+- **Hourly Updates**: TV shows update more frequently for new episodes
+- **Full Metadata**: Posters, ratings, genres, year, overview
+- **Categories**: Popular, Top Rated, On The Air, Airing Today
+- **Direct Streaming**: Uses CinemaOS scraper API for stream URLs
+
 ### Additional VOD Providers
 - **Cineby**: Additional movie source with browser-based extraction
-- **1Movies**: Alternative movie provider
 
 ---
 
@@ -221,6 +228,19 @@ networks:
 | `GET /cineby/movies` | List all Cineby movies |
 | `GET /cineby/:movieId/stream` | Stream a Cineby movie |
 
+### Cineby TV Shows (3,000+)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /tv/playlist.m3u` | M3U playlist with all TV shows |
+| `GET /tv/stats` | Database statistics |
+| `GET /tv/auto-refresh/status` | Auto-refresh status |
+| `POST /tv/auto-refresh/start?hours=1` | Start/change auto-refresh interval |
+| `POST /tv/auto-refresh/stop` | Stop auto-refresh |
+| `POST /tv/update` | Manual incremental update |
+| `POST /tv/fetch-full` | Full database refresh |
+| `POST /tv/generate-playlist` | Regenerate M3U playlist |
+
 ---
 
 ## Usage
@@ -230,6 +250,11 @@ networks:
 **For Movies:**
 ```
 http://<SERVER_IP>:7070/cinemaos/playlist.m3u
+```
+
+**For TV Shows:**
+```
+http://<SERVER_IP>:7070/tv/playlist.m3u
 ```
 
 **For Live TV with EPG:**
@@ -260,16 +285,23 @@ http://<SERVER_IP>:7070/stream/espn
 |---------|----------|-------------|
 | DirecTV EPG | 4 hours | Updates channel guide (830+ channels) |
 | CinemaOS Movies | 6 hours | Scans for new movies (incremental) |
+| Cineby TV Shows | 1 hour | Scans for new TV shows/episodes (incremental) |
 
 ---
 
 ## Database Statistics
 
-The CinemaOS database includes:
+### CinemaOS Movies
 - **23,148 unique movies** (deduplicated across categories)
 - **Categories**: popularMovie, latestMovie, topRatedMovie, upcomingMovie
 - **Genres**: Action, Comedy, Drama, Horror, Sci-Fi, Thriller, and more
 - **Full metadata**: Posters, backdrops, ratings, vote counts, release dates, overviews
+
+### Cineby TV Shows
+- **3,167 unique TV shows** (deduplicated across categories)
+- **Categories**: popular, top_rated, on_the_air, airing_today
+- **Genres**: Drama, Comedy, Sci-Fi & Fantasy, Crime, Animation, and more
+- **Full metadata**: Posters, backdrops, ratings, vote counts, first air dates, overviews
 
 ---
 
@@ -292,7 +324,8 @@ The CinemaOS database includes:
 │  │  • DirecTV Live Streams                             │    │
 │  │  • EPG Service (auto-refresh every 4 hours)         │    │
 │  │  • CinemaOS Movies (auto-refresh every 6 hours)     │    │
-│  │  • VOD Providers (Cineby, 1Movies)                  │    │
+│  │  • Cineby TV Shows (auto-refresh every 1 hour)      │    │
+│  │  • VOD Providers (Cineby)                           │    │
 │  │  • HLS Proxy with header injection                  │    │
 │  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
@@ -315,16 +348,18 @@ The CinemaOS database includes:
 ├── stream-proxy.js          # Main server
 ├── directv-epg.js           # EPG service with auto-refresh
 ├── cinemaos-db-manager.js   # Movie database with auto-refresh
+├── cineby-tv-manager.js     # TV show database with auto-refresh
 ├── tuner-manager.js         # DirecTV tuner management
 ├── channels.js              # Channel definitions
 ├── providers/
 │   ├── base-provider.js     # Base provider class
 │   ├── cinemaos/            # CinemaOS provider (direct API)
-│   ├── cineby/              # Cineby provider
-│   └── onemovies/           # 1Movies provider
+│   └── cineby/              # Cineby provider
 └── data/
     ├── cinemaos-movies-db.json  # Movie database (23K+ movies)
-    ├── cinemaos-movies.m3u      # Generated M3U playlist
+    ├── cinemaos-movies.m3u      # Movie M3U playlist
+    ├── cineby-tv-db.json        # TV show database (3K+ shows)
+    ├── cineby-tv.m3u            # TV show M3U playlist
     └── epg-cache.json           # EPG cache
 ```
 

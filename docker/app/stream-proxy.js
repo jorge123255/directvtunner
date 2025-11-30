@@ -15,6 +15,10 @@ const directvEpg = require('./directv-epg');
 const CinemaOSDbManager = require('./cinemaos-db-manager');
 const cinemaosManager = new CinemaOSDbManager();
 
+// Cineby TV Database Manager (for auto-refresh)
+const CinebyTVManager = require('./cineby-tv-manager');
+const tvManager = new CinebyTVManager();
+
 // Unified Provider System
 const providerRegistry = require('./providers/provider-registry');
 const cacheManager = require('./shared/cache-manager');
@@ -712,7 +716,7 @@ app.get('/vod/:providerId/status', (req, res) => {
 // Stream endpoint for any provider
 app.get('/vod/:providerId/:contentId/stream', async (req, res) => {
   const { providerId, contentId } = req.params;
-  const { title, year, imdbId } = req.query;  // Optional movie info for better API results
+  const { title, year, imdbId, mediaType, season, episode } = req.query;  // Optional info for better API results
 
   const provider = providerRegistry.get(providerId);
   if (!provider) {
@@ -720,12 +724,14 @@ app.get('/vod/:providerId/:contentId/stream', async (req, res) => {
   }
 
   try {
-    console.log(`[vod] Stream request: ${providerId}/${contentId}`);
+    // Determine content type (movie or tv)
+    const contentType = mediaType || 'movie';
+    console.log(`[vod] Stream request: ${providerId}/${contentId} (${contentType}${season ? ` S${season}E${episode}` : ''})`);
 
     // Get stream URL (from cache or fresh extraction)
-    // Pass movie info if provided (helps CinemaOS API)
-    const movieInfo = { title, year, imdbId };
-    const streamResult = await provider.extractStreamUrl(contentId, 'movie', movieInfo);
+    // Pass content info if provided (helps CinemaOS API)
+    const contentInfo = { title, year, imdbId, season, episode };
+    const streamResult = await provider.extractStreamUrl(contentId, contentType, contentInfo);
 
     // Handle both old format (string URL) and new format (object with url + headers)
     let streamUrl, streamHeaders;
@@ -977,6 +983,156 @@ app.post('/cinemaos/update', async (req, res) => {
   }
 });
 
+// ================== CINEBY TV SHOW ENDPOINTS ==================
+
+// TV Shows M3U Playlist
+app.get('/tv/playlist.m3u', (req, res) => {
+  const m3uPath = path.join(__dirname, 'data', 'cineby-tv.m3u');
+
+  if (!fs.existsSync(m3uPath)) {
+    return res.status(404).send('TV playlist not generated yet. POST to /tv/fetch-full first.');
+  }
+
+  res.setHeader('Content-Type', 'application/x-mpegurl');
+  res.setHeader('Content-Disposition', 'attachment; filename="cineby-tv.m3u"');
+  res.sendFile(m3uPath);
+});
+
+// TV database stats
+app.get('/tv/stats', (req, res) => {
+  try {
+    if (tvManager.shows.size === 0) {
+      tvManager.loadDatabase();
+    }
+    res.json(tvManager.getStats());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// TV auto-refresh status
+app.get('/tv/auto-refresh/status', (req, res) => {
+  res.json(tvManager.getAutoRefreshStatus());
+});
+
+// Stop TV auto-refresh
+app.post('/tv/auto-refresh/stop', (req, res) => {
+  tvManager.stopAutoRefresh();
+  res.json({ success: true, message: 'TV auto-refresh stopped' });
+});
+
+// Start/restart TV auto-refresh
+app.post('/tv/auto-refresh/start', (req, res) => {
+  const { hours } = req.query;
+  const intervalHours = hours ? parseInt(hours) : 1; // Default 1 hour for TV
+
+  tvManager.stopAutoRefresh();
+  tvManager.startAutoRefresh(intervalHours);
+
+  res.json({
+    success: true,
+    message: `TV auto-refresh started (every ${intervalHours} hour${intervalHours > 1 ? 's' : ''})`,
+    status: tvManager.getAutoRefreshStatus()
+  });
+});
+
+// TV full database fetch
+app.post('/tv/fetch-full', async (req, res) => {
+  try {
+    const host = req.headers.host || `${config.host}:${config.port}`;
+    process.env.TUNER_HOST = host;
+    process.env.DATA_DIR = path.join(__dirname, 'data');
+
+    console.log('[tv] Starting full database fetch...');
+
+    // Run in background
+    tvManager.fullFetch().then(() => {
+      tvManager.generateM3U();
+      console.log('[tv] Full fetch complete, playlist regenerated');
+    }).catch(err => {
+      console.error('[tv] Full fetch error:', err.message);
+    });
+
+    res.json({
+      success: true,
+      message: 'Full TV database fetch started in background.',
+      checkStatus: `http://${host}/tv/stats`
+    });
+
+  } catch (error) {
+    console.error('[tv] Fetch error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// TV incremental update
+app.post('/tv/update', async (req, res) => {
+  try {
+    const host = req.headers.host || `${config.host}:${config.port}`;
+    process.env.TUNER_HOST = host;
+    process.env.DATA_DIR = path.join(__dirname, 'data');
+
+    console.log('[tv] Starting incremental update...');
+
+    // Run in background
+    tvManager.incrementalUpdate().then((stats) => {
+      if (stats.new > 0) {
+        tvManager.generateM3U();
+        console.log(`[tv] Update complete: ${stats.new} new TV shows added`);
+      } else {
+        console.log('[tv] Update complete: no new TV shows found');
+      }
+    }).catch(err => {
+      console.error('[tv] Update error:', err.message);
+    });
+
+    res.json({
+      success: true,
+      message: 'Incremental update started in background.',
+      checkStatus: `http://${host}/tv/stats`
+    });
+
+  } catch (error) {
+    console.error('[tv] Update error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Generate TV playlist with options
+app.post('/tv/generate-playlist', async (req, res) => {
+  try {
+    const { maxShows, minVotes, minRating, sortBy } = req.query;
+    const host = req.headers.host || `${config.host}:${config.port}`;
+
+    process.env.TUNER_HOST = host;
+    process.env.DATA_DIR = path.join(__dirname, 'data');
+
+    if (tvManager.shows.size === 0) {
+      tvManager.loadDatabase();
+    }
+
+    const result = tvManager.generateM3U({
+      maxShows: maxShows ? parseInt(maxShows) : 0,
+      minVotes: minVotes ? parseInt(minVotes) : 0,
+      minRating: minRating ? parseFloat(minRating) : 0,
+      sortBy: sortBy || 'popularity'
+    });
+
+    res.json({
+      success: true,
+      totalShows: result.totalShows,
+      playlistUrl: `http://${host}/tv/playlist.m3u`,
+      fileSize: `${(result.fileSize / 1024).toFixed(1)} KB`
+    });
+
+  } catch (error) {
+    console.error('[tv] Playlist generation error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ================== END CINEBY TV SHOW ENDPOINTS ==================
+
 // Batch extraction for a provider
 app.post('/vod/:providerId/extract', async (req, res) => {
   const { providerId } = req.params;
@@ -1173,6 +1329,11 @@ async function start() {
     console.log(`  Database Stats:   http://<host>:${config.port}/cinemaos/stats`);
     console.log(`  Auto-refresh:     http://<host>:${config.port}/cinemaos/auto-refresh/status`);
     console.log('');
+    console.log('TV Shows (with hourly auto-refresh):');
+    console.log(`  M3U Playlist:     http://<host>:${config.port}/tv/playlist.m3u`);
+    console.log(`  Database Stats:   http://<host>:${config.port}/tv/stats`);
+    console.log(`  Auto-refresh:     http://<host>:${config.port}/tv/auto-refresh/status`);
+    console.log('');
     console.log('Add the M3U URL to TvMate or VLC to start watching!');
     console.log('='.repeat(60));
 
@@ -1184,6 +1345,10 @@ async function start() {
     process.env.TUNER_HOST = `${config.host}:${config.port}`;
     cinemaosManager.loadDatabase();
     cinemaosManager.startAutoRefresh(6);
+
+    // Start TV shows database auto-refresh (every 1 hour)
+    tvManager.loadDatabase();
+    tvManager.startAutoRefresh(1);
   });
 }
 

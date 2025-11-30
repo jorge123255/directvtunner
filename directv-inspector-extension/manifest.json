@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "DirecTV Inspector",
+  "version": "1.0",
+  "description": "Captures all activity during DirecTV login for debugging",
+  "permissions": [
+    "webRequest",
+    "storage",
+    "tabs",
+    "cookies",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*.directv.com/*",
+    "*://*.att.com/*",
+    "*://*.xperi.com/*",
+    "*://*.tivo.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.directv.com/*",
+        "*://*.att.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "DirecTV Inspector"
+  }
+}

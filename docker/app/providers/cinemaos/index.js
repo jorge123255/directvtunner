@@ -456,14 +456,19 @@ class CinemaOSProvider extends BaseProvider {
    * Extract m3u8 stream URL for a movie using direct API
    */
   async extractStreamUrl(contentId, contentType = 'movie', movieInfo = {}) {
+    // Build cache key - include season/episode for TV shows
+    const cacheKey = contentType === 'tv' && movieInfo.season
+      ? `${contentId}-s${movieInfo.season}e${movieInfo.episode || 1}`
+      : contentId;
+
     // Check in-memory cache
-    const cached = this.getCachedStreamUrl(contentId);
+    const cached = this.getCachedStreamUrl(cacheKey);
     if (cached) {
-      this.log(`Using cached stream for ${contentId}`);
+      this.log(`Using cached stream for ${cacheKey}`);
       return cached;
     }
 
-    this.log(`Extracting stream for ${contentType}/${contentId} via direct API`);
+    this.log(`Extracting stream for ${contentType}/${contentId}${contentType === 'tv' ? ` S${movieInfo.season}E${movieInfo.episode || 1}` : ''} via direct API`);
 
     try {
       // Build API params
@@ -478,6 +483,12 @@ class CinemaOSProvider extends BaseProvider {
         titlePortuguese: movieInfo.title || '',
         titleSpanish: movieInfo.title || ''
       };
+
+      // Add season and episode for TV shows
+      if (contentType === 'tv' && movieInfo.season) {
+        params.season = movieInfo.season;
+        params.episode = movieInfo.episode || 1;
+      }
 
       // Call the scraper API
       const apiData = await this.fetchFromScraperApi(params);
@@ -513,7 +524,7 @@ class CinemaOSProvider extends BaseProvider {
           };
 
           // Cache the result
-          this.cacheStreamUrl(contentId, streamInfo);
+          this.cacheStreamUrl(cacheKey, streamInfo);
 
           return streamInfo;
         }
@@ -534,7 +545,7 @@ class CinemaOSProvider extends BaseProvider {
             subtitles: decryptedData.tracks || []
           };
 
-          this.cacheStreamUrl(contentId, streamInfo);
+          this.cacheStreamUrl(cacheKey, streamInfo);
           return streamInfo;
         }
       }
