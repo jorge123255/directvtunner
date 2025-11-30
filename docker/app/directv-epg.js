@@ -227,9 +227,39 @@ class DirectvEpg {
       };
 
     } catch (err) {
-      await page.close().catch(() => {});
       this.isRefreshing = false;
       throw err;
+    } finally {
+      // Always ensure the guide page is closed
+      try {
+        if (page && !page.isClosed()) {
+          await page.close();
+          console.log('[epg] Closed EPG page');
+        }
+      } catch (e) {
+        console.log('[epg] Error closing page:', e.message);
+      }
+
+      // Extra safety: close any lingering guide pages via CDP
+      try {
+        const http = require('http');
+        const req = http.get('http://localhost:9222/json', (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => {
+            try {
+              const pages = JSON.parse(data);
+              for (const p of pages) {
+                if (p.type === 'page' && p.url && p.url.includes('/guide')) {
+                  http.get(`http://localhost:9222/json/close/${p.id}`);
+                  console.log('[epg] Force-closed lingering guide page');
+                }
+              }
+            } catch (e) {}
+          });
+        });
+        req.on('error', () => {});
+      } catch (e) {}
     }
   }
 
