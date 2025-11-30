@@ -772,6 +772,8 @@ app.get('/vod/:providerId/:contentId/stream', async (req, res) => {
     playlist = provider.rewritePlaylistUrls(playlist, proxyBase, contentId, streamUrl);
 
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Connection', 'keep-alive');
     res.send(playlist);
 
   } catch (error) {
@@ -819,6 +821,8 @@ app.get('/vod/:providerId/segment/:encodedUrl', async (req, res) => {
                            !upstreamType.includes('mpegurl'); // Not a playlist
     res.setHeader('Content-Type', isVideoSegment ? 'video/mp2t' : upstreamType);
     res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Connection', 'keep-alive');
 
     const buffer = await response.buffer();
     res.send(buffer);
