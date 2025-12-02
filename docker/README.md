@@ -427,6 +427,22 @@ Edit `app/channels.js` to add/modify channels:
 
 ---
 
+## ☕ Support
+
+If you find this project useful and want to support its development, consider buying me a coffee!
+
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/gszulc)
+
+Your support helps me:
+- Dedicate more time to adding new features
+- Fix bugs quickly
+- Maintain documentation
+- Keep the project alive long-term
+
+Thank you! 🙏
+
+---
+
 ## License
 
 MIT License
