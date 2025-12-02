@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DirecTV Tuner Settings</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+<body>
+  <div class="container" x-data="settingsApp()" x-init="init()">
+    <header>
+      <div class="version-badge" x-show="versionInfo.version">
+        <span class="version-label">v<span x-text="versionInfo.version"></span></span>
+        <span class="version-image" x-text="versionInfo.image"></span>
+        <span class="version-uptime">Uptime: <span x-text="versionInfo.uptimeFormatted"></span></span>
+      </div>
+      <h1>DirecTV Tuner Settings</h1>
+      <p class="subtitle">Configure video quality and streaming options</p>
+
+      <!-- System Status Banner -->
+      <div class="system-banner" :class="{ 'ready': systemStatus.system.ready, 'not-ready': !systemStatus.system.ready }" x-show="systemStatus.system.message">
+        <span class="status-icon" x-text="systemStatus.system.ready ? '✓' : '⏳'"></span>
+        <span class="status-text" x-text="systemStatus.system.message"></span>
+        <button class="btn-small" x-show="!systemStatus.system.ready && systemStatus.login.needsLogin" @click="openVNC()">Open noVNC</button>
+      </div>
+
+      <!-- Playlist URLs -->
+      <div class="url-box" x-show="systemStatus.system.ready">
+        <div class="url-item">
+          <label>M3U Playlist:</label>
+          <div class="url-copy">
+            <input type="text" readonly :value="baseUrl + '/tve/directv/playlist.m3u'" x-ref="playlistUrl">
+            <button class="btn-copy" @click="copyUrl($refs.playlistUrl)">Copy</button>
+          </div>
+        </div>
+        <div class="url-item">
+          <label>EPG (XMLTV):</label>
+          <div class="url-copy">
+            <input type="text" readonly :value="baseUrl + '/tve/directv/epg.xml'" x-ref="epgUrl">
+            <button class="btn-copy" @click="copyUrl($refs.epgUrl)">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Actions -->
+      <div class="quick-actions">
+        <button class="btn-vnc" @click="openVNC()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+            <line x1="8" y1="21" x2="16" y2="21"></line>
+            <line x1="12" y1="17" x2="12" y2="21"></line>
+          </svg>
+          Open noVNC
+        </button>
+      </div>
+    </header>
+
+    <!-- Preset Selector -->
+    <section class="presets-section">
+      <h2>Quick Presets</h2>
+      <div class="presets-grid">
+        <template x-for="preset in presets" :key="preset.id">
+          <button
+            class="preset-card"
+            :class="{ 'active': activePreset === preset.id }"
+            @click="applyPreset(preset.id)"
+          >
+            <span class="preset-name" x-text="preset.name"></span>
+            <span class="preset-desc" x-text="preset.description"></span>
+          </button>
+        </template>
+      </div>
+    </section>
+
+    <!-- Tabs -->
+    <nav class="tabs">
+      <button
+        :class="{ 'active': activeTab === 'video' }"
+        @click="activeTab = 'video'"
+      >Video</button>
+      <button
+        :class="{ 'active': activeTab === 'audio' }"
+        @click="activeTab = 'audio'"
+      >Audio</button>
+      <button
+        :class="{ 'active': activeTab === 'streaming' }"
+        @click="activeTab = 'streaming'"
+      >Streaming</button>
+      <button
+        :class="{ 'active': activeTab === 'system' }"
+        @click="activeTab = 'system'"
+      >System</button>
+      <button
+        :class="{ 'active': activeTab === 'logs' }"
+        @click="activeTab = 'logs'; if(!logsStarted) startLogs()"
+      >Logs</button>
+      <button
+        :class="{ 'active': activeTab === 'status' }"
+        @click="activeTab = 'status'; loadStatus()"
+      >Status</button>
+    </nav>
+
+    <!-- Tab Content -->
+    <main class="tab-content">
+      <!-- Video Tab -->
+      <div x-show="activeTab === 'video'" class="tab-panel">
+        <div class="form-group">
+          <label for="video-width">Resolution Width</label>
+          <input
+            type="number"
+            id="video-width"
+            x-model.number="settings.video.resolution.width"
+            min="640"
+            max="3840"
+            @input="markDirty()"
+          >
+          <span class="hint">pixels (640-3840)</span>
+        </div>
+
+        <div class="form-group">
+          <label for="video-height">Resolution Height</label>
+          <input
+            type="number"
+            id="video-height"
+            x-model.number="settings.video.resolution.height"
+            min="360"
+            max="2160"
+            @input="markDirty()"
+          >
+          <span class="hint">pixels (360-2160)</span>
+        </div>
+
+        <div class="form-group">
+          <label for="video-bitrate">Video Bitrate</label>
+          <input
+            type="text"
+            id="video-bitrate"
+            x-model="settings.video.bitrate"
+            placeholder="e.g., 4M or 2500k"
+            @input="markDirty()"
+          >
+          <span class="hint">e.g., 2M, 4M, 6M, 2500k</span>
+        </div>
+      </div>
+
+      <!-- Audio Tab -->
+      <div x-show="activeTab === 'audio'" class="tab-panel">
+        <div class="form-group">
+          <label for="audio-bitrate">Audio Bitrate</label>
+          <input
+            type="text"
+            id="audio-bitrate"
+            x-model="settings.audio.bitrate"
+            placeholder="e.g., 128k"
+            @input="markDirty()"
+          >
+          <span class="hint">e.g., 96k, 128k, 192k</span>
+        </div>
+      </div>
+
+      <!-- Streaming Tab -->
+      <div x-show="activeTab === 'streaming'" class="tab-panel">
+        <div class="form-group">
+          <label for="hls-segment">HLS Segment Time</label>
+          <input
+            type="number"
+            id="hls-segment"
+            x-model.number="settings.hls.segmentTime"
+            min="1"
+            max="10"
+            @input="markDirty()"
+          >
+          <span class="hint">seconds per segment (1-10)</span>
+        </div>
+
+        <div class="form-group">
+          <label for="hls-list">HLS List Size</label>
+          <input
+            type="number"
+            id="hls-list"
+            x-model.number="settings.hls.listSize"
+            min="3"
+            max="20"
+            @input="markDirty()"
+          >
+          <span class="hint">segments in playlist (3-20)</span>
+        </div>
+      </div>
+
+      <!-- System Tab -->
+      <div x-show="activeTab === 'system'" class="tab-panel">
+        <div class="form-group">
+          <label for="epg-interval">EPG Refresh Interval</label>
+          <input
+            type="number"
+            id="epg-interval"
+            x-model.number="settings.epg.refreshInterval"
+            min="1"
+            max="24"
+            @input="markDirty()"
+          >
+          <span class="hint">hours (1-24)</span>
+        </div>
+      </div>
+
+      <!-- Logs Tab -->
+      <div x-show="activeTab === 'logs'" class="tab-panel logs-panel">
+        <div class="logs-toolbar">
+          <div class="log-filters">
+            <label class="filter-label">Filter:</label>
+            <button
+              class="filter-btn"
+              :class="{ 'active': logFilter === 'all' }"
+              @click="logFilter = 'all'"
+            >All</button>
+            <button
+              class="filter-btn"
+              :class="{ 'active': logFilter === 'info' }"
+              @click="logFilter = 'info'"
+            >Info</button>
+            <button
+              class="filter-btn"
+              :class="{ 'active': logFilter === 'error' }"
+              @click="logFilter = 'error'"
+            >Error</button>
+            <button
+              class="filter-btn"
+              :class="{ 'active': logFilter === 'debug' }"
+              @click="logFilter = 'debug'"
+            >Debug</button>
+          </div>
+          <div class="logs-actions">
+            <button class="btn-small" @click="clearLogs()">Clear</button>
+            <button class="btn-small" @click="refreshLogs()">Refresh</button>
+            <label class="auto-scroll-label">
+              <input type="checkbox" x-model="autoScroll"> Auto-scroll
+            </label>
+          </div>
+        </div>
+        <div class="logs-container" x-ref="logsContainer">
+          <template x-for="(log, index) in filteredLogs" :key="index">
+            <div class="log-line" :class="'log-' + log.level">
+              <span class="log-time" x-text="log.time"></span>
+              <span class="log-level" x-text="log.level"></span>
+              <span class="log-message" x-text="log.message"></span>
+            </div>
+          </template>
+          <div x-show="filteredLogs.length === 0" class="logs-empty">
+            No logs to display
+          </div>
+        </div>
+      </div>
+
+      <!-- Status Tab -->
+      <div x-show="activeTab === 'status'" class="tab-panel status-panel">
+        <div class="status-grid">
+          <!-- Login Status -->
+          <div class="status-card">
+            <div class="status-header">
+              <h3>Login Status</h3>
+              <span class="badge" :class="systemStatus.login.isLoggedIn ? 'badge-ok' : 'badge-warning'"
+                x-text="systemStatus.login.isLoggedIn ? 'Logged In' : 'Needs Login'"></span>
+            </div>
+            <div class="status-body">
+              <p x-text="systemStatus.login.message || 'Checking...'"></p>
+              <button class="btn-small btn-vnc-small" @click="openVNC()" x-show="!systemStatus.login.isLoggedIn">
+                Open noVNC to Login
+              </button>
+            </div>
+          </div>
+
+          <!-- EPG Status -->
+          <div class="status-card">
+            <div class="status-header">
+              <h3>EPG / Channels</h3>
+              <span class="badge" :class="systemStatus.epg.channelCount > 0 ? 'badge-ok' : 'badge-warning'"
+                x-text="systemStatus.epg.channelCount + ' channels'"></span>
+            </div>
+            <div class="status-body">
+              <p>Last refresh: <span x-text="formatTime(systemStatus.epg.lastRefresh)"></span></p>
+              <p x-show="systemStatus.epg.isRefreshing" class="status-progress">Refreshing EPG...</p>
+              <button class="btn-small" @click="refreshEpg()" :disabled="systemStatus.epg.isRefreshing">
+                Refresh EPG Now
+              </button>
+            </div>
+          </div>
+
+          <!-- Tuners Status -->
+          <div class="status-card">
+            <div class="status-header">
+              <h3>Tuners</h3>
+              <span class="badge badge-ok" x-text="systemStatus.tuners.active + '/' + systemStatus.tuners.total + ' active'"></span>
+            </div>
+            <div class="status-body">
+              <template x-for="tuner in systemStatus.tuners.list" :key="tuner.id">
+                <div class="tuner-item">
+                  <span class="tuner-id" x-text="'Tuner ' + tuner.id"></span>
+                  <span class="tuner-channel" x-show="tuner.streaming">
+                    <span class="channel-num" x-text="tuner.channel"></span>
+                    <span class="channel-name" x-text="tuner.channelName"></span>
+                  </span>
+                  <span class="tuner-status" :class="tuner.streaming ? 'streaming' : 'idle'"
+                    x-text="tuner.streaming ? tuner.uptime : 'Idle'"></span>
+                </div>
+              </template>
+              <button class="btn-small btn-danger" @click="resetStreams()" :disabled="resettingStreams">
+                <span x-show="!resettingStreams">Reset All Streams</span>
+                <span x-show="resettingStreams">Resetting...</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- CinemaOS Status -->
+          <div class="status-card">
+            <div class="status-header">
+              <h3>CinemaOS Movies</h3>
+              <span class="badge" :class="systemStatus.cinemaos.available ? 'badge-ok' : 'badge-off'"
+                x-text="systemStatus.cinemaos.available ? 'Available' : 'N/A'"></span>
+            </div>
+            <div class="status-body">
+              <p x-text="systemStatus.cinemaos.movieCount + ' movies indexed'"></p>
+            </div>
+          </div>
+
+          <!-- TV Shows Status -->
+          <div class="status-card">
+            <div class="status-header">
+              <h3>TV Shows</h3>
+              <span class="badge" :class="systemStatus.tv.available ? 'badge-ok' : 'badge-off'"
+                x-text="systemStatus.tv.available ? 'Available' : 'N/A'"></span>
+            </div>
+            <div class="status-body">
+              <p x-text="systemStatus.tv.showCount + ' shows indexed'"></p>
+            </div>
+          </div>
+
+          <!-- Automations Status -->
+          <div class="status-card status-card-wide">
+            <div class="status-header">
+              <h3>Automations</h3>
+            </div>
+            <div class="status-body">
+              <div class="automation-item">
+                <span class="auto-name">Login Watcher</span>
+                <span class="auto-status" :class="systemStatus.automations.loginWatcher ? 'running' : 'stopped'"
+                  x-text="systemStatus.automations.loginWatcher ? 'Running' : 'Stopped'"></span>
+              </div>
+              <div class="automation-item">
+                <span class="auto-name">Auto EPG Refresh</span>
+                <span class="auto-status" :class="systemStatus.automations.autoEpgRefresh ? 'running' : 'stopped'"
+                  x-text="systemStatus.automations.autoEpgRefresh ? 'Enabled' : 'Disabled'"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="status-actions">
+          <button class="btn-small" @click="loadStatus()">Refresh Status</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- Actions -->
+    <footer class="actions" x-show="activeTab !== 'logs'">
+      <button
+        class="btn-save"
+        :disabled="!isDirty || saving"
+        @click="saveSettings()"
+      >
+        <span x-show="!saving">Save Settings</span>
+        <span x-show="saving">Saving...</span>
+      </button>
+      <button
+        class="btn-reset"
+        @click="resetToDefaults()"
+      >Reset to Defaults</button>
+    </footer>
+
+    <!-- Toast Notification -->
+    <div
+      class="toast"
+      :class="{ 'show': toast.show, 'error': toast.type === 'error', 'success': toast.type === 'success' }"
+      x-text="toast.message"
+    ></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

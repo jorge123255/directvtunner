@@ -3,6 +3,13 @@
 // searchTerms field allows matching against different variations of channel names in the guide
 
 const channels = [
+  // ================== CHICAGO LOCALS ==================
+  // Chicago DMA 602 local channels (discovered from iOS app traffic)
+  { id: 'wbbm', name: 'CBS Chicago (WBBM)', number: '2', category: 'Local', searchTerms: ['WBBM', 'CBS Chicago', 'CBS 2'], ccid: '8631' },
+  { id: 'wmaq', name: 'NBC Chicago (WMAQ)', number: '5', category: 'Local', searchTerms: ['WMAQ', 'NBC Chicago', 'NBC 5'], ccid: '8632' },
+  { id: 'wls', name: 'ABC Chicago (WLS)', number: '7', category: 'Local', searchTerms: ['WLS', 'ABC Chicago', 'ABC 7'], ccid: '8633' },
+  { id: 'wfld', name: 'FOX Chicago (WFLD)', number: '32', category: 'Local', searchTerms: ['WFLD', 'FOX Chicago', 'FOX 32'], ccid: '8634' },
+
   // ================== NEWS ==================
   { id: 'cnn', name: 'CNN', number: '202', category: 'News' },
   { id: 'hln', name: 'HLN', number: '204', category: 'News' },

@@ -15,8 +15,13 @@ class BaseProvider {
     this.m3u8Patterns = config.m3u8Patterns || [/\.m3u8(\?|$)/];
 
     // Stream URL cache (in-memory, short TTL)
+    // Note: Upstream URLs expire after ~2 mins, so keep cache TTL very short
     this.streamCache = new Map();
-    this.streamCacheTTL = 30 * 60 * 1000; // 30 minutes
+    this.streamCacheTTL = 90 * 1000; // 90 seconds (upstream expires at ~2 mins)
+
+    // Proactive refresh settings
+    this.refreshInterval = 60 * 1000;      // Refresh URLs every 60s (before 2min expiry)
+    this.inactivityTimeout = 5 * 60 * 1000; // Stop refreshing after 5min no activity
   }
 
   // ========== Required Methods (must be overridden) ==========
@@ -272,12 +277,20 @@ class BaseProvider {
   }
 
   /**
-   * Cache stream URL
+   * Cache stream URL with proactive refresh support
    */
   cacheStreamUrl(contentId, url) {
-    this.streamCache.set(contentId.toString(), {
+    const key = contentId.toString();
+    const existing = this.streamCache.get(key);
+
+    // Preserve refresh timer if already running
+    this.streamCache.set(key, {
       url,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      lastAccessed: Date.now(),
+      refreshTimer: existing?.refreshTimer || null,
+      isRefreshing: false,
+      contentType: existing?.contentType || 'movie'
     });
   }
 
@@ -301,10 +314,151 @@ class BaseProvider {
       entries.push({
         contentId: id,
         age: Math.round((Date.now() - data.timestamp) / 1000),
-        expired: Date.now() - data.timestamp >= this.streamCacheTTL
+        expired: Date.now() - data.timestamp >= this.streamCacheTTL,
+        refreshing: !!data.refreshTimer
       });
     }
     return entries;
+  }
+
+  // ========== Proactive URL Refresh Methods ==========
+
+  /**
+   * Start background refresh for an active stream
+   * Prevents URL expiration by proactively fetching fresh URLs
+   */
+  startStreamRefresh(contentId, contentType = 'movie') {
+    const key = contentId.toString();
+    const entry = this.streamCache.get(key);
+
+    if (!entry) {
+      console.log(`[${this.id}] Cannot start refresh - no cache entry for ${contentId}`);
+      return;
+    }
+
+    if (entry.refreshTimer) {
+      // Already refreshing, just update last accessed time
+      entry.lastAccessed = Date.now();
+      return;
+    }
+
+    console.log(`[${this.id}] Starting proactive refresh for ${contentId}`);
+    entry.contentType = contentType;
+    entry.lastAccessed = Date.now();
+
+    entry.refreshTimer = setInterval(async () => {
+      const currentEntry = this.streamCache.get(key);
+      if (!currentEntry) {
+        this.stopStreamRefresh(contentId);
+        return;
+      }
+
+      // Check if still active (accessed within inactivityTimeout)
+      const timeSinceAccess = Date.now() - currentEntry.lastAccessed;
+      if (timeSinceAccess > this.inactivityTimeout) {
+        console.log(`[${this.id}] Stream ${contentId} inactive for ${Math.round(timeSinceAccess / 1000)}s, stopping refresh`);
+        this.stopStreamRefresh(contentId);
+        return;
+      }
+
+      // Check if URL is old enough to need refresh
+      const urlAge = Date.now() - currentEntry.timestamp;
+      if (urlAge > this.refreshInterval && !currentEntry.isRefreshing) {
+        currentEntry.isRefreshing = true;
+        try {
+          console.log(`[${this.id}] Proactively refreshing URL for ${contentId} (age: ${Math.round(urlAge / 1000)}s)...`);
+          // Clear cache to force fresh extraction
+          const savedEntry = { ...currentEntry };
+          this.clearStreamCache(contentId);
+          const freshUrl = await this.extractStreamUrl(contentId, savedEntry.contentType);
+          // Re-cache with fresh URL but preserve timer
+          this.cacheStreamUrl(contentId, freshUrl);
+          const newEntry = this.streamCache.get(key);
+          if (newEntry) {
+            newEntry.refreshTimer = savedEntry.refreshTimer;
+            newEntry.contentType = savedEntry.contentType;
+          }
+          console.log(`[${this.id}] URL refreshed successfully for ${contentId}`);
+        } catch (err) {
+          console.error(`[${this.id}] Proactive refresh failed for ${contentId}:`, err.message);
+          // Don't clear cache on refresh failure - keep using existing URL
+        }
+        const updatedEntry = this.streamCache.get(key);
+        if (updatedEntry) {
+          updatedEntry.isRefreshing = false;
+        }
+      }
+    }, 15000); // Check every 15 seconds
+  }
+
+  /**
+   * Stop background refresh for a stream
+   */
+  stopStreamRefresh(contentId) {
+    const key = contentId.toString();
+    const entry = this.streamCache.get(key);
+    if (entry?.refreshTimer) {
+      clearInterval(entry.refreshTimer);
+      entry.refreshTimer = null;
+      console.log(`[${this.id}] Stopped proactive refresh for ${contentId}`);
+    }
+  }
+
+  /**
+   * Mark stream as accessed (extends refresh lifetime)
+   * Call this on every segment request to keep the stream "alive"
+   */
+  touchStream(contentId) {
+    const key = contentId.toString();
+    const entry = this.streamCache.get(key);
+    if (entry) {
+      entry.lastAccessed = Date.now();
+    }
+  }
+
+  /**
+   * Get current stream URL (with touch)
+   * Use this instead of getCachedStreamUrl for segment requests
+   */
+  getActiveStreamUrl(contentId) {
+    const key = contentId.toString();
+    const entry = this.streamCache.get(key);
+    if (entry) {
+      entry.lastAccessed = Date.now();
+      return entry.url;
+    }
+    return null;
+  }
+
+  /**
+   * Attempt urgent URL refresh (when current URL fails)
+   * Returns the new URL or null if refresh fails
+   */
+  async urgentRefresh(contentId, contentType = 'movie') {
+    const key = contentId.toString();
+    const entry = this.streamCache.get(key);
+
+    if (entry?.isRefreshing) {
+      console.log(`[${this.id}] Urgent refresh requested but already refreshing ${contentId}`);
+      // Wait for current refresh to complete
+      await this.sleep(2000);
+      return this.streamCache.get(key)?.url || null;
+    }
+
+    console.log(`[${this.id}] Urgent refresh triggered for ${contentId}`);
+
+    // IMPORTANT: Clear cache first to force fresh extraction
+    this.clearStreamCache(contentId);
+
+    try {
+      const freshUrl = await this.extractStreamUrl(contentId, contentType);
+      this.cacheStreamUrl(contentId, freshUrl);
+      console.log(`[${this.id}] Urgent refresh successful for ${contentId}`);
+      return freshUrl;
+    } catch (err) {
+      console.error(`[${this.id}] Urgent refresh failed for ${contentId}:`, err.message);
+      return null;
+    }
   }
 
   // ========== Utility Methods ==========

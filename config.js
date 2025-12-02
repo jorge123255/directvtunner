@@ -1,17 +1,21 @@
 const path = require('path');
 const os = require('os');
+const settingsManager = require('./settings-manager');
 
 // Detect platform for FFmpeg capture settings
 const isMac = os.platform() === 'darwin';
 const isLinux = os.platform() === 'linux';
 
-module.exports = {
+// Load saved settings
+let savedSettings = settingsManager.getSettings();
+
+const config = {
   // Server settings
   port: parseInt(process.env.DVR_PORT) || 7070,
   host: process.env.DVR_HOST || '0.0.0.0',
 
-  // Tuner settings
-  numTuners: parseInt(process.env.DVR_NUM_TUNERS) || 1,
+  // Tuner settings (env var takes priority, then saved settings)
+  numTuners: parseInt(process.env.DVR_NUM_TUNERS) || savedSettings.tuners.count,
   baseDebugPort: 9222,
   baseDisplayNum: 99,
 
@@ -29,15 +33,12 @@ module.exports = {
   channelSwitchDelay: 5000,  // Wait for video to start after navigation
   ffmpegStartDelay: 3000,  // Wait after FFmpeg starts before serving
 
-  // Video settings
-  resolution: {
-    width: 1280,
-    height: 720,
-  },
-  videoBitrate: '2500k',
-  audioBitrate: '128k',
-  hlsSegmentTime: 4,
-  hlsListSize: 5,
+  // Video settings (from saved settings)
+  resolution: savedSettings.video.resolution,
+  videoBitrate: savedSettings.video.bitrate,
+  audioBitrate: savedSettings.audio.bitrate,
+  hlsSegmentTime: savedSettings.hls.segmentTime,
+  hlsListSize: savedSettings.hls.listSize,
 
   // Platform-specific FFmpeg settings
   ffmpeg: {
@@ -61,4 +62,25 @@ module.exports = {
   getPlatform() {
     return isMac ? 'mac' : 'linux';
   },
+
+  // Reload settings from file (called after settings are saved)
+  reload() {
+    savedSettings = settingsManager.loadSettings();
+    // Update mutable config values
+    this.resolution = savedSettings.video.resolution;
+    this.videoBitrate = savedSettings.video.bitrate;
+    this.audioBitrate = savedSettings.audio.bitrate;
+    this.hlsSegmentTime = savedSettings.hls.segmentTime;
+    this.hlsListSize = savedSettings.hls.listSize;
+    // Note: numTuners requires restart, so we don't update it here
+    console.log('[config] Settings reloaded:', {
+      resolution: this.resolution,
+      videoBitrate: this.videoBitrate,
+      audioBitrate: this.audioBitrate,
+      hlsSegmentTime: this.hlsSegmentTime,
+      hlsListSize: this.hlsListSize
+    });
+  }
 };
+
+module.exports = config;

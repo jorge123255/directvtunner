@@ -2,6 +2,16 @@
 # Wait for Xvfb and PulseAudio to be ready
 sleep 5
 
+# Clean up stale Chrome lock files (prevents "profile in use" errors after container restart)
+CHROME_PROFILE="/data/chrome-profile"
+if [ -d "$CHROME_PROFILE" ]; then
+    echo "Cleaning up Chrome lock files..."
+    rm -f "$CHROME_PROFILE/SingletonLock" \
+          "$CHROME_PROFILE/SingletonCookie" \
+          "$CHROME_PROFILE/SingletonSocket" 2>/dev/null
+    echo "Chrome lock files cleaned"
+fi
+
 export DISPLAY=:1
 export PULSE_SERVER=unix:/run/pulse/native
 

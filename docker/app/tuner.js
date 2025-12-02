@@ -188,6 +188,166 @@ class Tuner {
     this.page = pages[0] || await context.newPage();
 
     console.log(`[tuner-${this.id}] Playwright connected`);
+
+    // Set up Chicago locals interception
+    await this.setupChicagoInterception();
+  }
+
+  async setupChicagoInterception() {
+    if (this.chicagoInterceptorSetUp) return;
+
+    const { CHICAGO_CLIENT_CONTEXT, CHICAGO_LOCALS } = require('./chicago-locals');
+
+    console.log(`[tuner-${this.id}] Setting up Chicago locals API interception...`);
+
+    // Debug: Log all requests to find DRM license URL
+    this.page.on('request', request => {
+      const url = request.url();
+      if (url.includes('drm') || url.includes('license') || url.includes('widevine') ||
+          url.includes('playback') || url.includes('dtvcdn')) {
+        console.log(`[tuner-${this.id}] [REQUEST] ${request.method()} ${url}`);
+      }
+    });
+
+    this.page.on('response', response => {
+      const url = response.url();
+      if (url.includes('drm') || url.includes('license') || url.includes('widevine') ||
+          url.includes('playback') || url.includes('dtvcdn')) {
+        console.log(`[tuner-${this.id}] [RESPONSE] ${response.status()} ${url}`);
+      }
+    });
+
+    // Intercept allchannels API response and modify it
+    await this.page.route('**/api.cld.dtvce.com/**/allchannels**', async (route) => {
+      const request = route.request();
+
+      // Add Chicago DMA header
+      const headers = {
+        ...request.headers(),
+        'x-client-context': CHICAGO_CLIENT_CONTEXT
+      };
+
+      try {
+        // Fetch with modified headers
+        const response = await route.fetch({ headers });
+        const json = await response.json();
+
+        // Inject Chicago locals
+        if (json.channelInfoList) {
+          json.channelInfoList = this.injectChicagoLocals(json.channelInfoList);
+        }
+
+        await route.fulfill({
+          status: response.status(),
+          headers: response.headers(),
+          body: JSON.stringify(json)
+        });
+
+        console.log(`[tuner-${this.id}] Injected Chicago locals into channel list`);
+      } catch (err) {
+        console.log(`[tuner-${this.id}] Interception fetch error: ${err.message}`);
+        // Continue with original request if interception fails
+        await route.continue();
+      }
+    });
+
+    // Intercept Widevine DRM license requests and add Chicago location headers
+    await this.page.route('**/dtv-drm.prod.dtvcdn.com/**', async (route) => {
+      const request = route.request();
+      console.log(`[tuner-${this.id}] Intercepting DRM license request: ${request.url()}`);
+
+      // Add Chicago geo headers to bypass location check
+      const headers = {
+        ...request.headers(),
+        'x-dtv-edgescape': 'IL:CICERO:60804',  // Illinois, Cicero zip code (Chicago area)
+        'x-client-context': CHICAGO_CLIENT_CONTEXT,
+        'x-forwarded-for': '73.159.0.1',  // Chicago area IP range
+      };
+
+      try {
+        const response = await route.fetch({ headers });
+        const body = await response.body();
+
+        console.log(`[tuner-${this.id}] DRM license response: ${response.status()}`);
+
+        await route.fulfill({
+          status: response.status(),
+          headers: response.headers(),
+          body: body
+        });
+      } catch (err) {
+        console.log(`[tuner-${this.id}] DRM interception error: ${err.message}`);
+        await route.continue();
+      }
+    });
+
+    // Also intercept playback API requests
+    await this.page.route('**/api.cld.dtvce.com/**/playback/**', async (route) => {
+      const request = route.request();
+      console.log(`[tuner-${this.id}] Intercepting playback API: ${request.url()}`);
+
+      const headers = {
+        ...request.headers(),
+        'x-dtv-edgescape': 'IL:CICERO:60804',
+        'x-client-context': CHICAGO_CLIENT_CONTEXT,
+      };
+
+      try {
+        const response = await route.fetch({ headers });
+        const body = await response.body();
+
+        await route.fulfill({
+          status: response.status(),
+          headers: response.headers(),
+          body: body
+        });
+      } catch (err) {
+        console.log(`[tuner-${this.id}] Playback API interception error: ${err.message}`);
+        await route.continue();
+      }
+    });
+
+    this.chicagoInterceptorSetUp = true;
+    console.log(`[tuner-${this.id}] Chicago locals interception ready (including DRM license)`);
+  }
+
+  injectChicagoLocals(channelList) {
+    const { CHICAGO_LOCALS } = require('./chicago-locals');
+
+    // Build lookup for NY -> Chicago replacement
+    const replacementMap = {};
+    for (const ch of CHICAGO_LOCALS) {
+      for (const nyCall of ch.replacesNY || []) {
+        replacementMap[nyCall.toUpperCase()] = ch;
+      }
+    }
+
+    let replaced = 0;
+    const result = channelList.map(channel => {
+      const replacement = replacementMap[channel.callSign?.toUpperCase()];
+      if (replacement) {
+        console.log(`[tuner-${this.id}] Replacing ${channel.callSign} -> ${replacement.callSign} (ccid: ${replacement.ccid})`);
+        replaced++;
+        return {
+          ...channel,
+          callSign: replacement.callSign,
+          ccid: replacement.ccid,
+          channelName: replacement.channelName
+        };
+      }
+      return channel;
+    });
+
+    console.log(`[tuner-${this.id}] Replaced ${replaced} NY locals with Chicago locals`);
+    return result;
+  }
+
+  /**
+   * Check if a channel is a Chicago local that needs special handling
+   */
+  isChicagoLocal(channel) {
+    const chicagoIds = ['wbbm', 'wmaq', 'wls', 'wfld'];
+    return chicagoIds.includes(channel.id?.toLowerCase()) && channel.ccid;
   }
 
   async tuneToChannel(channelId) {
@@ -210,6 +370,13 @@ class Tuner {
       if (this.ffmpeg && this.ffmpeg.isRunning) {
         this.ffmpeg.stop();
         await new Promise(r => setTimeout(r, 500));  // Reduced from 1000ms
+      }
+
+      // Chicago locals now go through normal guide flow
+      // The API interception replaces NY locals with Chicago CCIDs in the channel list
+      // so when we click channel 2 (CBS) it loads WBBM instead of WCBS
+      if (this.isChicagoLocal(channel)) {
+        console.log(`[tuner-${this.id}] Chicago local channel: ${channel.name} - using guide flow with API interception`);
       }
 
       // Navigate to guide page to select channel
@@ -258,29 +425,7 @@ class Tuner {
           return ariaLabel.startsWith('view');
         });
 
-        // Priority 1: Try to match by channel number (most reliable)
-        if (number) {
-          const numberPattern = ` ${number} `;
-          for (const link of channelLinks) {
-            const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
-            if (ariaLabel.includes(numberPattern)) {
-              link.click();
-              return { clicked: true, method: `channel number ${number} in "${ariaLabel}"` };
-            }
-          }
-        }
-
-        // Priority 2: Try exact name match
-        const exactName = name.toLowerCase();
-        for (const link of channelLinks) {
-          const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
-          if (ariaLabel.includes(exactName)) {
-            link.click();
-            return { clicked: true, method: `exact name "${exactName}" in "${ariaLabel}"` };
-          }
-        }
-
-        // Priority 3: Try searchTerms (alternate names)
+        // Priority 1: Try searchTerms first (most specific for Chicago locals like WBBM, WMAQ)
         if (searchTerms && searchTerms.length > 0) {
           for (const term of searchTerms) {
             const termLower = term.toLowerCase();
@@ -291,6 +436,40 @@ class Tuner {
                 return { clicked: true, method: `searchTerm "${termLower}" in "${ariaLabel}"` };
               }
             }
+          }
+        }
+
+        // Priority 2: Try to match by channel number with leading zero (for local channels like 02, 05)
+        if (number) {
+          const paddedNumber = number.padStart(2, '0');
+          const paddedPattern = ` ${paddedNumber} `;
+          for (const link of channelLinks) {
+            const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
+            if (ariaLabel.includes(paddedPattern)) {
+              link.click();
+              return { clicked: true, method: `padded channel number ${paddedNumber} in "${ariaLabel}"` };
+            }
+          }
+          // Also try non-padded but only if > 2 digits (to avoid matching "SHOWTIME 2")
+          if (number.length >= 3 || parseInt(number) >= 100) {
+            const numberPattern = ` ${number} `;
+            for (const link of channelLinks) {
+              const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
+              if (ariaLabel.includes(numberPattern)) {
+                link.click();
+                return { clicked: true, method: `channel number ${number} in "${ariaLabel}"` };
+              }
+            }
+          }
+        }
+
+        // Priority 3: Try exact name match
+        const exactName = name.toLowerCase();
+        for (const link of channelLinks) {
+          const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
+          if (ariaLabel.includes(exactName)) {
+            link.click();
+            return { clicked: true, method: `exact name "${exactName}" in "${ariaLabel}"` };
           }
         }
 
@@ -780,6 +959,79 @@ class Tuner {
   // Check if streaming is active
   isStreaming() {
     return this.ffmpeg && this.ffmpeg.isRunning;
+  }
+
+  /**
+   * Tune to a Chicago local channel using direct watch URL
+   * This bypasses the guide and navigates directly to the channel stream
+   */
+  async tuneToChicagoChannel(channel) {
+    const watchUrl = `https://stream.directv.com/watch/channel/${channel.ccid}`;
+    console.log(`[tuner-${this.id}] Navigating to Chicago watch URL: ${watchUrl}`);
+
+    try {
+      // Navigate directly to the watch URL
+      await this.page.goto(watchUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+
+      // Wait for video to start playing
+      console.log(`[tuner-${this.id}] Waiting for Chicago channel video to load...`);
+      const videoReady = await this.waitForVideoPlaying();
+
+      if (!videoReady) {
+        // Check if there's a geo-restriction error message
+        const errorMessage = await this.page.evaluate(() => {
+          // Look for common error messages
+          const errorSelectors = [
+            '[class*="error"]',
+            '[class*="message"]',
+            '[role="alert"]',
+            '.toast-message',
+          ];
+          for (const selector of errorSelectors) {
+            const el = document.querySelector(selector);
+            if (el && el.textContent) {
+              const text = el.textContent.toLowerCase();
+              if (text.includes('not available') || text.includes('can\'t be streamed') ||
+                  text.includes('location') || text.includes('geo')) {
+                return el.textContent.trim();
+              }
+            }
+          }
+          // Also check the entire body for these phrases
+          const bodyText = document.body?.innerText || '';
+          if (bodyText.toLowerCase().includes('can\'t be streamed here')) {
+            return 'This program can\'t be streamed here';
+          }
+          return null;
+        });
+
+        if (errorMessage) {
+          console.log(`[tuner-${this.id}] Geo-restriction detected: ${errorMessage}`);
+          throw new Error(`Chicago channel blocked: ${errorMessage}`);
+        }
+
+        console.log(`[tuner-${this.id}] Video not detected, proceeding anyway`);
+      }
+
+      // Maximize video
+      await this.maximizeVideo();
+
+      // Start FFmpeg capture
+      await this.ffmpeg.start(this.displayNum);
+
+      this.state = TunerState.STREAMING;
+      console.log(`[tuner-${this.id}] Now streaming Chicago channel: ${channel.name}`);
+
+      return true;
+    } catch (err) {
+      console.error(`[tuner-${this.id}] Failed to tune to Chicago channel:`, err.message);
+      this.state = TunerState.ERROR;
+      this.currentChannel = null;
+      throw err;
+    }
   }
 }
 

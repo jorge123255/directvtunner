@@ -31,11 +31,21 @@ providerRegistry.register(new CinebyProvider());
 providerRegistry.register(new CinemaOSProvider());
 providerRegistry.register(new OneMoviesProvider());
 
+// Settings GUI
+const settingsManager = require('./settings-manager');
+const { getPresets, getPreset } = require('./presets');
+
 const app = express();
+
+// JSON body parsing for settings API
+app.use(express.json());
+
+// Serve static files (settings GUI)
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Middleware for logging
 app.use((req, res, next) => {
-  console.log(`[server] ${req.method} ${req.url}`);
+  if (!req.url.startsWith('/api/logs')) console.log(`[server] ${req.method} ${req.url}`);
   next();
 });
 
@@ -51,6 +61,469 @@ app.use((req, res, next) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', tuners: tunerManager.getStatus() });
 });
+
+// ============================================
+// Version API
+// ============================================
+app.get('/api/version', (req, res) => {
+  const pkg = require('./package.json');
+  const os = require('os');
+  
+  function formatUptime(seconds) {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    if (days > 0) return days + 'd ' + hours + 'h ' + mins + 'm';
+    if (hours > 0) return hours + 'h ' + mins + 'm';
+    return mins + 'm';
+  }
+  
+  res.json({
+    version: pkg.version || '1.0.0',
+    name: pkg.name || 'directv-tuner',
+    image: process.env.DOCKER_IMAGE || 'sunnyside1/directvtuner:latest',
+    buildDate: process.env.BUILD_DATE || null,
+    nodeVersion: process.version,
+    platform: os.platform(),
+    arch: os.arch(),
+    uptime: Math.floor(process.uptime()),
+    uptimeFormatted: formatUptime(process.uptime())
+  });
+});
+
+
+// ============================================
+// System Status API
+// ============================================
+
+app.get("/api/status", async (req, res) => {
+  try {
+    // Check login status by examining the browser page
+    let loginStatus = {
+      isLoggedIn: false,
+      currentUrl: "",
+      needsLogin: false,
+      message: ""
+    };
+
+    // Try to get browser page info
+    try {
+      const tuner = tunerManager.getTuner(0);
+      if (tuner && tuner.page) {
+        const url = tuner.page.url();
+        loginStatus.currentUrl = url;
+        loginStatus.isLoggedIn = url.includes("stream.directv.com") && !url.includes("login") && !url.includes("signin") && !url.includes("auth");
+        loginStatus.needsLogin = url.includes("login") || url.includes("signin") || url.includes("auth");
+        if (loginStatus.needsLogin) {
+          loginStatus.message = "Please log in via noVNC";
+        } else if (loginStatus.isLoggedIn) {
+          loginStatus.message = "Logged in to DirecTV";
+        } else {
+          loginStatus.message = "Checking login status...";
+        }
+      } else {
+        loginStatus.message = "Browser not ready";
+      }
+    } catch (e) {
+      loginStatus.error = e.message;
+      loginStatus.message = "Error checking login";
+    }
+
+    // EPG Status
+    const epgStatus = directvEpg.getStatus();
+    epgStatus.autoRefreshEnabled = directvEpg.refreshTimer !== null;
+
+    // CinemaOS status
+    let cinemaosStatus = { enabled: false };
+    try {
+      const stats = cinemaosManager.getStats();
+      cinemaosStatus = {
+        enabled: stats.autoRefreshEnabled || false,
+        movieCount: stats.totalMovies || 0,
+        lastUpdate: stats.lastUpdate
+      };
+    } catch (e) {}
+
+    // TV status
+    let tvStatus = { enabled: false };
+    try {
+      const stats = tvManager.getStats();
+      tvStatus = {
+        enabled: stats.autoRefreshEnabled || false,
+        showCount: stats.totalShows || 0,
+        lastUpdate: stats.lastUpdate
+      };
+    } catch (e) {}
+    // Get tuner status with channel names
+    const tunerStatus = tunerManager.getStatus();
+    
+    // Load channels to get names
+    let channelMap = {};
+    try {
+      const fs = require("fs");
+      const channelsPath = "/app/data/directv_channels.json";
+      if (fs.existsSync(channelsPath)) {
+        const data = JSON.parse(fs.readFileSync(channelsPath, "utf8"));
+        (data.channels || []).forEach(ch => {
+          channelMap[ch.number] = { name: ch.callSign || ch.name, fullName: ch.name };
+        });
+      }
+    } catch (e) {}
+    
+    // Enhance tuner info with channel names
+    tunerStatus.tuners = tunerStatus.tuners.map(t => ({
+      ...t,
+      channelName: channelMap[t.channel] ? channelMap[t.channel].name : "",
+      channelFullName: channelMap[t.channel] ? channelMap[t.channel].fullName : ""
+    }));
+
+    // System ready status
+    const channelsLoaded = directvEpg.getChannels().length > 0;
+    const browserReady = loginStatus.currentUrl !== "";
+    const systemReady = channelsLoaded && browserReady && loginStatus.isLoggedIn;
+
+    let systemMessage = "Ready";
+    if (!browserReady) {
+      systemMessage = "Browser starting...";
+    } else if (!loginStatus.isLoggedIn) {
+      systemMessage = "Please log in via noVNC";
+    } else if (!channelsLoaded) {
+      systemMessage = "Loading channels...";
+    }
+
+    res.json({
+      system: {
+        ready: systemReady,
+        message: systemMessage,
+        browserReady: browserReady,
+        channelsLoaded: channelsLoaded,
+        uptime: Math.floor(process.uptime())
+      },
+      login: loginStatus,
+      epg: epgStatus,
+      cinemaos: cinemaosStatus,
+      tv: tvStatus,
+      tuners: tunerStatus
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+// ============================================
+// Settings API
+// ============================================
+
+// Get current settings
+app.get('/api/settings', (req, res) => {
+  res.json(settingsManager.getSettings());
+});
+
+// Save settings
+app.post('/api/settings', (req, res) => {
+  try {
+    const saved = settingsManager.saveSettings(req.body);
+    res.json({ success: true, settings: saved, restartRequired: false });
+  } catch (err) {
+    console.error('[server] Failed to save settings:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reset to defaults
+app.post('/api/settings/reset', (req, res) => {
+  try {
+    const defaults = settingsManager.getDefaults();
+    const saved = settingsManager.saveSettings(defaults);
+    res.json({ success: true, settings: saved });
+  } catch (err) {
+    console.error('[server] Failed to reset settings:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get available presets
+app.get('/api/presets', (req, res) => {
+  res.json(getPresets());
+});
+
+// Apply a preset
+app.post('/api/presets/:presetId', (req, res) => {
+  const { presetId } = req.params;
+  const preset = getPreset(presetId);
+
+  if (!preset) {
+    return res.status(404).json({ error: `Preset "${presetId}" not found` });
+  }
+
+  try {
+    const currentSettings = settingsManager.getSettings();
+    const newSettings = {
+      ...currentSettings,
+      ...preset.settings,
+      // tuners preserved from currentSettings above
+    };
+
+    // Save the preset settings
+    settingsManager.saveSettings(newSettings);
+    res.json({ success: true, name: preset.name, settings: newSettings });
+  } catch (err) {
+    console.error('[server] Failed to apply preset:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ============================================
+// Logs API
+// ============================================
+
+// Get server logs
+app.get('/api/logs', (req, res) => {
+  const lines = parseInt(req.query.lines) || 100;
+  const logFile = '/var/log/supervisor/dvr.log';
+  const errFile = '/var/log/supervisor/dvr_err.log';
+  
+  const logs = [];
+  
+  // Helper to parse log lines
+  const parseLogLine = (line, isError = false) => {
+    const timestamp = new Date().toISOString().substr(11, 8);
+    let level = 'info';
+    let message = line.trim();
+    
+    if (!message) return null;
+    
+    // Filter out noisy cineby fetch errors
+    if (message.includes('[cineby] Error fetching from API')) return null;
+    
+    // Detect level from content
+    if (isError || message.includes('Error:') || message.includes('[error]') || message.includes('ERROR') || message.includes('failed')) {
+      level = 'error';
+    } else if (message.includes('[debug]') || message.includes('DEBUG')) {
+      level = 'debug';
+    } else if (message.includes('[warn]') || message.includes('WARN')) {
+      level = 'warn';
+    }
+    
+    // Extract timestamp if present in log
+    const tsMatch = message.match(/^\[?(\d{2}:\d{2}:\d{2})\]?\s*/);
+    const time = tsMatch ? tsMatch[1] : timestamp;
+    
+    return { time, level, message };
+  };
+  
+  try {
+    // Read main log
+    if (fs.existsSync(logFile)) {
+      const content = fs.readFileSync(logFile, 'utf8');
+      const logLines = content.split('\n').slice(-lines);
+      logLines.forEach(line => {
+        const parsed = parseLogLine(line);
+        if (parsed) logs.push(parsed);
+      });
+    }
+    
+    // Read error log
+    if (fs.existsSync(errFile)) {
+      const content = fs.readFileSync(errFile, 'utf8');
+      const errLines = content.split('\n').slice(-Math.floor(lines / 2));
+      errLines.forEach(line => {
+        const parsed = parseLogLine(line, true);
+        if (parsed) logs.push(parsed);
+      });
+    }
+    
+    // Sort by time (most recent last)
+    logs.sort((a, b) => a.time.localeCompare(b.time));
+    
+    res.json({ logs: logs.slice(-lines) });
+  } catch (err) {
+    // Handle no upcoming airings with a generated error video
+    if (err.message === "NO_UPCOMING_AIRINGS") {
+      // Reset the tuner so it can be used again
+      tunerManager.releaseTuner(0);
+      console.log(`[server] Channel ${channelId} has no upcoming airings, sending error video`);
+      res.setHeader("Content-Type", "video/mp2t");
+      res.setHeader("Cache-Control", "no-cache");
+      
+      // Generate a simple error video with FFmpeg
+      const { spawn } = require("child_process");
+      const ffmpeg = spawn("ffmpeg", [
+        "-f", "lavfi",
+        "-i", `color=c=black:s=1280x720:d=10`,
+        "-f", "lavfi",
+        "-i", "anullsrc=r=44100:cl=stereo",
+        "-vf", `drawtext=text='No Upcoming Airings\nPlease Change Channel':fontsize=48:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2`,
+        "-t", "10",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-c:a", "aac",
+        "-f", "mpegts",
+        "-"
+      ]);
+      
+      ffmpeg.stdout.pipe(res);
+      ffmpeg.stderr.on("data", () => {});
+      ffmpeg.on("close", () => res.end());
+      return;
+    }
+
+    res.status(500).json({ error: err.message, logs: [] });
+  }
+});
+
+
+// ============================================
+// System Info API
+// ============================================
+
+app.get('/api/system-info', (req, res) => {
+  try {
+    const os = require('os');
+    const uptime = process.uptime();
+    const hours = Math.floor(uptime / 3600);
+    const minutes = Math.floor((uptime % 3600) / 60);
+    const uptimeStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+
+    const memUsage = process.memoryUsage();
+    const memoryStr = `${Math.round(memUsage.heapUsed / 1024 / 1024)}MB / ${Math.round(memUsage.heapTotal / 1024 / 1024)}MB`;
+
+    // Get container ID
+    let containerId = '-';
+    try {
+      containerId = fs.readFileSync('/etc/hostname', 'utf8').trim().substring(0, 12);
+    } catch (e) {}
+
+    // Get image info from environment or file
+    const imageInfo = process.env.DVR_IMAGE || 'sunnyside1/directvtuner:latest';
+    const version = process.env.DVR_VERSION || '1.0';
+
+    res.json({
+      version: version,
+      image: imageInfo,
+      uptime: uptimeStr,
+      memory: memoryStr,
+      nodeVersion: process.version,
+      containerId: containerId
+    });
+  } catch (err) {
+    console.error('[server] Failed to get system info:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ============================================
+// Diagnostics Export API
+// ============================================
+
+app.get('/api/diagnostics', async (req, res) => {
+  try {
+    const os = require('os');
+    const { execSync } = require('child_process');
+    const archiver = require('archiver');
+
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="dvr-diagnostics-${timestamp}.zip"`);
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.pipe(res);
+
+    // System info
+    const systemInfo = {
+      timestamp: new Date().toISOString(),
+      version: process.env.DVR_VERSION || '1.0',
+      image: process.env.DVR_IMAGE || 'sunnyside1/directvtuner:latest',
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+      env: {
+        DVR_NUM_TUNERS: process.env.DVR_NUM_TUNERS,
+        EXTERNAL: process.env.EXTERNAL,
+        DISPLAY: process.env.DISPLAY
+      }
+    };
+    archive.append(JSON.stringify(systemInfo, null, 2), { name: 'system-info.json' });
+
+    // Tuner status
+    try {
+      const tunerStatus = tunerManager.getStatus();
+      archive.append(JSON.stringify(tunerStatus, null, 2), { name: 'tuner-status.json' });
+    } catch (e) {
+      archive.append(`Error getting tuner status: ${e.message}`, { name: 'tuner-status-error.txt' });
+    }
+
+    // Current settings
+    try {
+      const settings = settingsManager.getSettings();
+      archive.append(JSON.stringify(settings, null, 2), { name: 'settings.json' });
+    } catch (e) {
+      archive.append(`Error getting settings: ${e.message}`, { name: 'settings-error.txt' });
+    }
+
+    // Log files
+    const logFiles = [
+      '/var/log/supervisor/dvr.log',
+      '/var/log/supervisor/dvr_err.log',
+      '/var/log/supervisor/chrome_err.log',
+      '/var/log/supervisor/supervisord.log'
+    ];
+
+    for (const logFile of logFiles) {
+      try {
+        if (fs.existsSync(logFile)) {
+          const content = fs.readFileSync(logFile, 'utf8');
+          // Only include last 10000 lines to keep file size reasonable
+          const lines = content.split('\n').slice(-10000).join('\n');
+          const filename = path.basename(logFile);
+          archive.append(lines, { name: `logs/${filename}` });
+        }
+      } catch (e) {
+        archive.append(`Error reading ${logFile}: ${e.message}`, { name: `logs/${path.basename(logFile)}-error.txt` });
+      }
+    }
+
+    // Process list
+    try {
+      const ps = execSync('ps aux', { encoding: 'utf8', timeout: 5000 });
+      archive.append(ps, { name: 'processes.txt' });
+    } catch (e) {
+      archive.append(`Error getting process list: ${e.message}`, { name: 'processes-error.txt' });
+    }
+
+    // Network info
+    try {
+      const netInterfaces = os.networkInterfaces();
+      archive.append(JSON.stringify(netInterfaces, null, 2), { name: 'network-interfaces.json' });
+    } catch (e) {
+      archive.append(`Error getting network info: ${e.message}`, { name: 'network-error.txt' });
+    }
+
+    // Disk usage
+    try {
+      const df = execSync('df -h', { encoding: 'utf8', timeout: 5000 });
+      archive.append(df, { name: 'disk-usage.txt' });
+    } catch (e) {
+      archive.append(`Error getting disk usage: ${e.message}`, { name: 'disk-error.txt' });
+    }
+
+    await archive.finalize();
+
+  } catch (err) {
+    console.error('[server] Failed to generate diagnostics:', err.message);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+});
+
 
 // M3U Playlist endpoint
 app.get('/playlist.m3u', (req, res) => {
@@ -154,6 +627,36 @@ app.get('/stream/:channelId', async (req, res) => {
     // or the tuner is released
 
   } catch (err) {
+    // Handle no upcoming airings with a generated error video
+    if (err.message === "NO_UPCOMING_AIRINGS") {
+      // Reset the tuner so it can be used again
+      tunerManager.releaseTuner(0);
+      console.log(`[server] Channel ${channelId} has no upcoming airings, sending error video`);
+      res.setHeader("Content-Type", "video/mp2t");
+      res.setHeader("Cache-Control", "no-cache");
+      
+      // Generate a simple error video with FFmpeg
+      const { spawn } = require("child_process");
+      const ffmpeg = spawn("ffmpeg", [
+        "-f", "lavfi",
+        "-i", `color=c=black:s=1280x720:d=10`,
+        "-f", "lavfi",
+        "-i", "anullsrc=r=44100:cl=stereo",
+        "-vf", `drawtext=text='No Upcoming Airings\nPlease Change Channel':fontsize=48:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2`,
+        "-t", "10",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-c:a", "aac",
+        "-f", "mpegts",
+        "-"
+      ]);
+      
+      ffmpeg.stdout.pipe(res);
+      ffmpeg.stderr.on("data", () => {});
+      ffmpeg.on("close", () => res.end());
+      return;
+    }
+
     console.error(`[server] Error allocating tuner for ${channelId}:`, err.message);
     res.status(500).json({ error: err.message });
   }
@@ -243,6 +746,80 @@ app.post('/tuner/:tunerId/force-release', async (req, res) => {
   const { tunerId } = req.params;
   await tunerManager.releaseTuner(tunerId);
   res.json({ success: true });
+});
+
+// Kill all FFmpeg processes (emergency reset)
+app.post("/api/ffmpeg/kill", async (req, res) => {
+  try {
+    const { execSync } = require("child_process");
+    // Kill any running ffmpeg processes
+    try {
+      execSync("pkill -9 ffmpeg", { timeout: 5000 });
+      console.log("[server] FFmpeg processes killed via API");
+    } catch (e) {
+      // pkill returns error if no processes found, which is fine
+    }
+    // Reset tuner states
+    const status = tunerManager.getStatus();
+    for (const tuner of status.tuners) {
+      if (tuner.state === 'streaming' || tuner.state === 'tuning') {
+        await tunerManager.releaseTuner(tuner.id);
+      }
+    }
+    res.json({ success: true, message: "FFmpeg processes killed and tuners reset" });
+  } catch (err) {
+    console.error("[server] Failed to kill FFmpeg:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reset Chrome (clean lock files and restart)
+app.post("/api/chrome/reset", async (req, res) => {
+  try {
+    const { execSync } = require("child_process");
+    const fs = require("fs");
+    const path = require("path");
+
+    const chromeProfile = "/data/chrome-profile";
+    const lockFiles = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
+
+    // Kill Chrome first
+    try {
+      execSync("pkill -9 chrome", { timeout: 5000 });
+      console.log("[server] Chrome processes killed");
+    } catch (e) {
+      // Chrome might not be running
+    }
+
+    // Clean up lock files
+    let cleaned = [];
+    for (const lockFile of lockFiles) {
+      const filePath = path.join(chromeProfile, lockFile);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        cleaned.push(lockFile);
+      }
+    }
+
+    console.log("[server] Chrome lock files cleaned:", cleaned.length > 0 ? cleaned.join(", ") : "none found");
+
+    // Restart Chrome via supervisorctl
+    try {
+      execSync("supervisorctl restart chrome", { timeout: 10000 });
+      console.log("[server] Chrome restarted via supervisorctl");
+    } catch (e) {
+      console.log("[server] supervisorctl not available, Chrome will restart automatically");
+    }
+
+    res.json({
+      success: true,
+      message: "Chrome reset successfully",
+      cleanedFiles: cleaned
+    });
+  } catch (err) {
+    console.error("[server] Failed to reset Chrome:", err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ================== CINEBY ENDPOINTS ==================
@@ -728,10 +1305,17 @@ app.get('/vod/:providerId/:contentId/stream', async (req, res) => {
     const contentType = mediaType || 'movie';
     console.log(`[vod] Stream request: ${providerId}/${contentId} (${contentType}${season ? ` S${season}E${episode}` : ''})`);
 
-    // Get stream URL (from cache or fresh extraction)
-    // Pass content info if provided (helps CinemaOS API)
-    const contentInfo = { title, year, imdbId, season, episode };
-    const streamResult = await provider.extractStreamUrl(contentId, contentType, contentInfo);
+    // Check if we already have a fresh stream URL from proactive refresh
+    // This is critical: if proactive refresh has run, use the NEW URL, not old cache
+    let streamResult = provider.getActiveStreamUrl(contentId);
+
+    // If no active stream (first request or expired), extract fresh
+    if (!streamResult) {
+      const contentInfo = { title, year, imdbId, season, episode };
+      streamResult = await provider.extractStreamUrl(contentId, contentType, contentInfo);
+    } else {
+      console.log(`[vod] Using proactively refreshed URL for ${contentId}`);
+    }
 
     // Handle both old format (string URL) and new format (object with url + headers)
     let streamUrl, streamHeaders;
@@ -771,9 +1355,29 @@ app.get('/vod/:providerId/:contentId/stream', async (req, res) => {
     const proxyBase = `http://${host}/vod/${providerId}`;
     playlist = provider.rewritePlaylistUrls(playlist, proxyBase, contentId, streamUrl);
 
-    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Connection', 'keep-alive');
+    // Extract segment URLs for prefetching
+    const segmentUrls = [];
+    const lines = playlist.split("\n");
+    for (const line of lines) {
+      const match = line.match(/\/segment\/([^\?]+)/);
+      if (match) segmentUrls.push(match[1]);
+    }
+
+    // Store segments and trigger background prefetch
+    if (segmentUrls.length > 0) {
+      playlistSegmentData.set(contentId, { segments: segmentUrls, headers: streamHeaders });
+      console.log(`[vod] Queued ${segmentUrls.length} segments for prefetch (${contentId})`);
+      // Start prefetching immediately in background
+      setImmediate(() => prefetchSegmentsForContent(contentId));
+    }
+
+    // Remove EXT-X-ENDLIST to make it live-like
+    playlist = playlist.replace("#EXT-X-ENDLIST", "");
+
+    provider.startStreamRefresh(contentId, contentType);
+
+    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.send(playlist);
 
   } catch (error) {
@@ -782,54 +1386,127 @@ app.get('/vod/:providerId/:contentId/stream', async (req, res) => {
   }
 });
 
-// Segment proxy for any provider
+// ============ SEGMENT PREFETCHING SYSTEM ============
+const segmentDataCache = new Map();
+const SEGMENT_CACHE_TTL = 15 * 60 * 1000;
+const SEGMENT_CACHE_MAX_SIZE = 600;
+const prefetchActive = new Map();
+const playlistSegmentData = new Map(); // Store segment list per content
+
+// Cleanup timer
+setInterval(() => {
+  const now = Date.now();
+  let deleted = 0;
+  for (const [key, value] of segmentDataCache) {
+    if (now - value.timestamp > SEGMENT_CACHE_TTL) {
+      segmentDataCache.delete(key);
+      deleted++;
+    }
+  }
+  if (deleted > 0) console.log(`[vod] Cache cleanup: ${deleted} removed, ${segmentDataCache.size} remaining`);
+}, 60000);
+
+// Prefetch segments in background
+async function prefetchSegmentsForContent(contentId) {
+  const data = playlistSegmentData.get(contentId);
+  if (!data) return;
+  
+  const { segments, headers } = data;
+  const fetch = (await import('node-fetch')).default;
+  let success = 0, failed = 0;
+  
+  console.log(`[vod] PREFETCH START: ${segments.length} segments for ${contentId}`);
+  prefetchActive.set(contentId, true);
+  
+  for (let i = 0; i < segments.length && prefetchActive.get(contentId); i++) {
+    const encodedUrl = segments[i];
+    if (segmentDataCache.has(encodedUrl)) { success++; continue; }
+    
+    try {
+      const segmentUrl = Buffer.from(encodedUrl, 'base64url').toString('utf8');
+      const resp = await fetch(segmentUrl, {
+        headers: { ...headers, 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' }
+      });
+      
+      if (resp.ok) {
+        const buf = await resp.buffer();
+        if (segmentDataCache.size >= SEGMENT_CACHE_MAX_SIZE) {
+          segmentDataCache.delete(segmentDataCache.keys().next().value);
+        }
+        segmentDataCache.set(encodedUrl, { data: buf, timestamp: Date.now(), contentType: 'video/mp2t' });
+        success++;
+        if (success % 20 === 0) console.log(`[vod] Prefetch progress: ${success}/${segments.length} for ${contentId}`);
+      } else {
+        failed++;
+        if (resp.status === 503 || resp.status === 403) {
+          console.log(`[vod] Prefetch URLs expired at segment ${i}, got ${success} segments`);
+          break;
+        }
+      }
+    } catch (e) { failed++; }
+    
+    // Tiny delay to be nice to upstream
+    await new Promise(r => setTimeout(r, 20));
+  }
+  
+  prefetchActive.delete(contentId);
+  console.log(`[vod] PREFETCH DONE: ${success} cached, ${failed} failed for ${contentId}`);
+}
+
+// Segment proxy with cache
 app.get('/vod/:providerId/segment/:encodedUrl', async (req, res) => {
   const { providerId, encodedUrl } = req.params;
-  const { cid } = req.query;  // Content ID for getting correct headers
+  const { cid } = req.query;
 
   const provider = providerRegistry.get(providerId);
-  if (!provider) {
-    return res.status(404).send('Unknown provider');
+  if (!provider) return res.status(404).send('Unknown provider');
+
+  if (cid) {
+    provider.touchStream(cid);
+    provider.startStreamRefresh(cid, 'movie');
   }
 
+  // SERVE FROM CACHE
+  const cached = segmentDataCache.get(encodedUrl);
+  if (cached) {
+    res.setHeader('Content-Type', cached.contentType);
+    res.setHeader('X-Cache', 'HIT');
+    return res.send(cached.data);
+  }
+
+  // Fetch from upstream
   try {
     const segmentUrl = Buffer.from(encodedUrl, 'base64url').toString('utf8');
-
-    // Get headers - use stored headers if available, otherwise default
     let headers = provider.getProxyHeaders();
-    if (cid && provider._streamHeaders && provider._streamHeaders[cid]) {
-      headers = provider._streamHeaders[cid];
-    }
+    if (cid && provider._streamHeaders?.[cid]) headers = provider._streamHeaders[cid];
 
     const fetch = (await import('node-fetch')).default;
-    const response = await fetch(segmentUrl, {
-      headers: {
-        ...headers,
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-      }
+    const resp = await fetch(segmentUrl, {
+      headers: { ...headers, 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' }
     });
 
-    if (!response.ok) {
-      return res.status(response.status).send('Upstream error');
+    if (!resp.ok) {
+      console.log(`[vod] Segment ${resp.status} for ${cid}`);
+      if (resp.status === 503 || resp.status === 403) {
+        return res.status(410).send('Segment expired');
+      }
+      return res.status(resp.status).send('Error');
     }
 
-    // Always use video/mp2t for segments - upstream may disguise as image/jpg
-    const upstreamType = response.headers.get('content-type') || '';
-    const isVideoSegment = segmentUrl.includes('.ts') || segmentUrl.includes('.m4s') ||
-                           segmentUrl.includes('seg-') || segmentUrl.includes('/file') ||
-                           upstreamType.includes('image/') || // Disguised video
-                           !upstreamType.includes('mpegurl'); // Not a playlist
-    res.setHeader('Content-Type', isVideoSegment ? 'video/mp2t' : upstreamType);
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Connection', 'keep-alive');
+    const buffer = await resp.buffer();
+    
+    // Cache it
+    if (segmentDataCache.size >= SEGMENT_CACHE_MAX_SIZE) {
+      segmentDataCache.delete(segmentDataCache.keys().next().value);
+    }
+    segmentDataCache.set(encodedUrl, { data: buffer, timestamp: Date.now(), contentType: 'video/mp2t' });
 
-    const buffer = await response.buffer();
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('X-Cache', 'MISS');
     res.send(buffer);
-
-  } catch (error) {
-    console.error(`[vod] Segment proxy error:`, error.message);
-    res.status(500).send('Proxy error');
+  } catch (e) {
+    console.error(`[vod] Segment error:`, e.message);
+    res.status(500).send('Error');
   }
 });
 
@@ -1333,6 +2010,71 @@ app.get('/tve/directv/stream/:channelNumber', async (req, res) => {
 // ================== END DIRECTV EPG ENDPOINTS ==================
 
 // Startup
+// Login watcher - monitors for login and triggers EPG refresh when logged in
+let loginWatcherActive = false;
+let loginDetected = false;
+
+async function startLoginWatcher() {
+  if (loginWatcherActive) return;
+  loginWatcherActive = true;
+  loginDetected = false;
+  
+  console.log("[login-watcher] Starting login monitor...");
+  
+  const checkInterval = 10000; // Check every 10 seconds
+  const maxWait = 600000; // Max 10 minutes
+  let waited = 0;
+  
+  const check = async () => {
+    try {
+      const tuner = tunerManager.getTuner(0);
+      if (tuner && tuner.page) {
+        const url = tuner.page.url();
+        const isLoggedIn = url.includes("stream.directv.com") && 
+          !url.includes("login") && 
+          !url.includes("signin") && 
+          !url.includes("auth");
+        
+        if (isLoggedIn && !loginDetected) {
+          loginDetected = true;
+          console.log("[login-watcher] Login detected! Triggering EPG refresh...");
+          
+          // Check if EPG is empty or stale
+          const epgStatus = directvEpg.getStatus();
+          if (epgStatus.channelCount === 0 || epgStatus.cacheAge > 14400) {
+            try {
+              await directvEpg.fetchFromBrowser();
+              console.log("[login-watcher] EPG refresh completed");
+            } catch (e) {
+              console.error("[login-watcher] EPG refresh failed:", e.message);
+            }
+          } else {
+            console.log("[login-watcher] EPG already has " + epgStatus.channelCount + " channels");
+          }
+          loginWatcherActive = false;
+          return;
+        } else if (!isLoggedIn) {
+          console.log("[login-watcher] Waiting for login... (URL: " + url.substring(0, 50) + "...)");
+        }
+      }
+    } catch (e) {
+      console.log("[login-watcher] Check error:", e.message);
+    }
+    
+    waited += checkInterval;
+    if (waited < maxWait) {
+      setTimeout(check, checkInterval);
+    } else {
+      console.log("[login-watcher] Timeout waiting for login");
+      loginWatcherActive = false;
+    }
+  };
+  
+  // Start checking after 15 seconds (give browser time to load)
+  setTimeout(check, 15000);
+}
+
+
 async function start() {
   console.log('='.repeat(60));
   console.log('DirecTV IPTV Proxy Server');
@@ -1378,6 +2120,9 @@ async function start() {
     console.log('');
     console.log('Add the M3U URL to TvMate or VLC to start watching!');
     console.log('='.repeat(60));
+
+    // Start login watcher - checks for login and triggers EPG refresh
+    startLoginWatcher();
 
     // Start EPG auto-refresh (every 4 hours)
     directvEpg.startAutoRefresh();

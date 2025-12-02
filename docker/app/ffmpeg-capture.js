@@ -10,15 +10,15 @@ class FFmpegCapture {
     this.outputDir = outputDir;
     this.process = null;
     this.isRunning = false;
-    this.clients = [];  // Connected HTTP response streams
-    this.broadcastStream = null;  // PassThrough stream for multicasting
-    this.shouldRestart = false;  // Auto-reconnect flag
-    this.displayNum = 1;  // Store display number for restart
+    this.clients = [];
+    this.broadcastStream = null;
+    this.shouldRestart = false;
+    this.displayNum = 1;
     this.restartAttempts = 0;
     this.maxRestartAttempts = 5;
-    this.restartDelay = 2000;  // 2 seconds between restart attempts
+    this.restartDelay = 2000;
+    this.stopping = false; // New flag to track stopping state
 
-    // Stream statistics for health monitoring
     this.stats = {
       startTime: null,
       bytesTransferred: 0,
@@ -29,25 +29,51 @@ class FFmpegCapture {
     };
   }
 
+  // Helper method to wait for process to fully terminate
+  async waitForProcessExit(timeout = 5000) {
+    if (!this.process) return true;
+    
+    return new Promise((resolve) => {
+      const startTime = Date.now();
+      const checkInterval = setInterval(() => {
+        if (!this.process || !this.isRunning) {
+          clearInterval(checkInterval);
+          resolve(true);
+        } else if (Date.now() - startTime > timeout) {
+          clearInterval(checkInterval);
+          // Force kill if still running
+          if (this.process) {
+            console.log(`[ffmpeg-${this.tunerId}] Force killing hung process`);
+            this.process.kill('SIGKILL');
+          }
+          resolve(false);
+        }
+      }, 100);
+    });
+  }
+
   async start(displayNum) {
-    // If already running, stop first (for channel switching)
-    if (this.isRunning) {
-      console.log(`[ffmpeg-${this.tunerId}] Already running, stopping for channel switch...`);
-      this.shouldRestart = false;  // Disable auto-restart during channel switch
-      this.stop();
-      await new Promise(r => setTimeout(r, 500));
+    // Prevent concurrent start calls while stopping
+    if (this.stopping) {
+      console.log(`[ffmpeg-${this.tunerId}] Waiting for stop to complete...`);
+      await this.waitForProcessExit(5000);
     }
 
-    this.displayNum = displayNum;  // Store for auto-restart
-    this.shouldRestart = true;  // Enable auto-restart
-    this.restartAttempts = 0;  // Reset restart counter
+    if (this.isRunning && this.process) {
+      console.log(`[ffmpeg-${this.tunerId}] Already running, stopping for channel switch...`);
+      this.shouldRestart = false;
+      await this.stopAndWait();
+    }
+
+    this.displayNum = displayNum;
+    this.shouldRestart = true;
+    this.restartAttempts = 0;
+    this.stopping = false;
 
     const platform = config.getPlatform();
 
-    // Create broadcast stream for multicasting to multiple clients
     this.broadcastStream = new PassThrough();
 
-    // Reset stats
     this.stats.startTime = Date.now();
     this.stats.bytesTransferred = 0;
     this.stats.errors = [];
@@ -55,12 +81,11 @@ class FFmpegCapture {
     let args;
 
     if (platform === 'mac') {
-      // macOS: Use avfoundation, output MPEG-TS to stdout
       args = [
         '-f', 'avfoundation',
         '-framerate', '30',
         '-capture_cursor', '0',
-        '-i', '1:none',  // Screen only, no audio for now
+        '-i', '1:none',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-tune', 'zerolatency',
@@ -69,53 +94,54 @@ class FFmpegCapture {
         '-b:v', config.videoBitrate,
         '-maxrate', config.videoBitrate,
         '-bufsize', '1M',
-        '-g', '30',  // Keyframe every 1 second at 30fps
+        '-g', '30',
         '-f', 'mpegts',
-        'pipe:1',  // Output to stdout
+        'pipe:1',
       ];
     } else {
-      // Linux: MPEG-TS direct streaming to stdout with all improvements
+      // Linux: Use config values for resolution, bitrate, audio
+      const videoBitrate = config.videoBitrate || '4M';
+      const audioBitrate = config.audioBitrate || '128k';
+      const width = config.resolution?.width || 1280;
+      const height = config.resolution?.height || 720;
+
+      console.log(`[ffmpeg-${this.tunerId}] Using settings: ${width}x${height} @ ${videoBitrate} video, ${audioBitrate} audio`);
+
       args = [
-        // Input thread queue size for smoother capture (increased for stability)
         '-thread_queue_size', '1024',
-        // Video input (x11grab)
         '-f', 'x11grab',
         '-framerate', '30',
-        '-video_size', `${config.resolution.width}x${config.resolution.height}`,
+        '-video_size', `${width}x${height}`,
         '-i', `:${displayNum}`,
-        // Audio input (PulseAudio)
         '-thread_queue_size', '1024',
         '-f', 'pulse',
         '-ac', '2',
         '-i', 'virtual_speaker.monitor',
-        // Video encoding - high quality streaming
         '-c:v', 'libx264',
         '-preset', 'veryfast',
         '-tune', 'zerolatency',
         '-profile:v', 'high',
         '-level', '4.1',
         '-pix_fmt', 'yuv420p',
-        // Adaptive bitrate range - CRF with max bitrate constraint
-        '-crf', '23',  // Quality-based encoding
-        '-b:v', '8M',
-        '-maxrate', '10M',  // Allow bursts up to 10Mbps for complex scenes
-        '-bufsize', '8M',  // Larger buffer for smoother playback
-        '-g', '60',  // Keyframe every 2 seconds (better compression)
+        '-crf', '23',
+        '-b:v', videoBitrate,
+        '-maxrate', videoBitrate,
+        '-bufsize', '2M',
+        '-g', '60',
         '-keyint_min', '30',
-        '-bf', '2',  // B-frames for better compression
-        '-b_strategy', '1',  // Adaptive B-frame placement
-        '-sc_threshold', '40',  // Scene change detection
-        '-refs', '3',  // Reference frames for better quality
+        '-bf', '2',
+        '-b_strategy', '1',
+        '-sc_threshold', '40',
+        '-refs', '3',
         '-flags', '+cgop',
-        // Audio encoding - improved quality
         '-c:a', 'aac',
-        '-b:a', '192k',  // Upgraded from 128k for better audio
-        '-ar', '48000',  // Higher sample rate
+        '-b:a', audioBitrate,
+        '-ar', '48000',
         '-ac', '2',
-        // Muxing options for better streaming
+        '-async', '1',
+        '-vsync', 'cfr',
         '-muxdelay', '0',
         '-muxpreload', '0',
-        // Output MPEG-TS to stdout
         '-f', 'mpegts',
         'pipe:1',
       ];
@@ -127,25 +153,20 @@ class FFmpegCapture {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    // Pipe FFmpeg stdout to broadcast stream
     this.process.stdout.on('data', (data) => {
-      // Update stats
       this.stats.bytesTransferred += data.length;
       this.stats.lastActivity = Date.now();
 
-      // Write to all connected clients
       for (let i = this.clients.length - 1; i >= 0; i--) {
         const client = this.clients[i];
         if (client.writable && !client.destroyed) {
           try {
             client.write(data);
           } catch (err) {
-            // Client write error, remove it
             this.clients.splice(i, 1);
             console.log(`[ffmpeg-${this.tunerId}] Client write error, ${this.clients.length} remaining`);
           }
         } else {
-          // Remove dead clients
           this.clients.splice(i, 1);
           console.log(`[ffmpeg-${this.tunerId}] Removed dead client, ${this.clients.length} remaining`);
         }
@@ -154,18 +175,15 @@ class FFmpegCapture {
 
     this.process.stderr.on('data', (data) => {
       const msg = data.toString();
-      // Parse FFmpeg progress info for stats
       if (msg.includes('frame=')) {
         const frameMatch = msg.match(/frame=\s*(\d+)/);
         if (frameMatch) {
           this.stats.framesProcessed = parseInt(frameMatch[1]);
         }
       }
-      // Log errors
       if (msg.includes('Error') || msg.includes('error')) {
         console.error(`[ffmpeg-${this.tunerId}] ${msg}`);
         this.stats.errors.push({ time: Date.now(), message: msg.trim() });
-        // Keep only last 10 errors
         if (this.stats.errors.length > 10) {
           this.stats.errors.shift();
         }
@@ -176,8 +194,8 @@ class FFmpegCapture {
       console.log(`[ffmpeg-${this.tunerId}] Process exited with code ${code}`);
       this.isRunning = false;
       this.process = null;
+      this.stopping = false;
 
-      // Auto-restart if enabled and has clients
       if (this.shouldRestart && this.clients.length > 0 && code !== 0) {
         this.restartAttempts++;
         if (this.restartAttempts <= this.maxRestartAttempts) {
@@ -188,13 +206,12 @@ class FFmpegCapture {
               this.start(this.displayNum);
             }
           }, this.restartDelay);
-          return;  // Don't end client connections, keep them for restart
+          return;
         } else {
           console.error(`[ffmpeg-${this.tunerId}] Max restart attempts reached, giving up`);
         }
       }
 
-      // End all client connections
       for (const client of this.clients) {
         if (!client.destroyed) {
           client.end();
@@ -211,17 +228,14 @@ class FFmpegCapture {
 
     this.isRunning = true;
 
-    // Give FFmpeg a moment to start producing output
     await new Promise(r => setTimeout(r, 500));
     console.log(`[ffmpeg-${this.tunerId}] MPEG-TS stream ready`);
   }
 
-  // Add a client to receive the MPEG-TS stream
   addClient(res) {
     this.clients.push(res);
     console.log(`[ffmpeg-${this.tunerId}] Client connected, ${this.clients.length} total`);
 
-    // Remove client when connection closes
     res.on('close', () => {
       const idx = this.clients.indexOf(res);
       if (idx !== -1) {
@@ -231,30 +245,69 @@ class FFmpegCapture {
     });
   }
 
-  // Get number of connected clients
   getClientCount() {
     return this.clients.length;
   }
 
-  stop() {
-    this.shouldRestart = false;  // Disable auto-restart when explicitly stopped
+  // New method: stop and wait for process to fully terminate
+  async stopAndWait() {
+    this.shouldRestart = false;
+    this.stopping = true;
 
     if (this.process) {
-      console.log(`[ffmpeg-${this.tunerId}] Stopping capture...`);
-      this.process.kill('SIGTERM');
+      console.log(`[ffmpeg-${this.tunerId}] Stopping capture and waiting...`);
+      
+      const proc = this.process;
+      proc.kill('SIGTERM');
 
-      // Force kill after 3 seconds if still running
-      setTimeout(() => {
-        if (this.process) {
-          this.process.kill('SIGKILL');
-        }
-      }, 3000);
+      // Wait for process to exit
+      await new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          if (proc && !proc.killed) {
+            console.log(`[ffmpeg-${this.tunerId}] Force killing after timeout`);
+            proc.kill('SIGKILL');
+          }
+          resolve();
+        }, 3000);
+
+        proc.once('close', () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
 
       this.process = null;
       this.isRunning = false;
     }
 
-    // End all client connections
+    // Clear clients
+    for (const client of this.clients) {
+      if (!client.destroyed) {
+        client.end();
+      }
+    }
+    this.clients = [];
+    this.stopping = false;
+  }
+
+  stop() {
+    this.shouldRestart = false;
+    this.stopping = true;
+
+    if (this.process) {
+      console.log(`[ffmpeg-${this.tunerId}] Stopping capture...`);
+      const proc = this.process;
+      proc.kill('SIGTERM');
+
+      setTimeout(() => {
+        if (proc && !proc.killed) {
+          proc.kill('SIGKILL');
+        }
+      }, 3000);
+
+      // Don't null the process here - let the 'close' event handle it
+    }
+
     for (const client of this.clients) {
       if (!client.destroyed) {
         client.end();
@@ -263,7 +316,6 @@ class FFmpegCapture {
     this.clients = [];
   }
 
-  // Get stream health statistics
   getStats() {
     const uptime = this.stats.startTime ? Date.now() - this.stats.startTime : 0;
     const avgBitrate = uptime > 0 ? (this.stats.bytesTransferred * 8 / (uptime / 1000)) : 0;
@@ -277,7 +329,7 @@ class FFmpegCapture {
       framesProcessed: this.stats.framesProcessed,
       avgBitrateMbps: (avgBitrate / 1000000).toFixed(2),
       clientCount: this.clients.length,
-      errors: this.stats.errors.slice(-5),  // Last 5 errors
+      errors: this.stats.errors.slice(-5),
       errorCount: this.stats.errors.length,
       restarts: this.stats.restarts,
       lastActivity: this.stats.lastActivity,
@@ -285,7 +337,6 @@ class FFmpegCapture {
     };
   }
 
-  // Format bytes to human readable
   formatBytes(bytes) {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -294,7 +345,6 @@ class FFmpegCapture {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-  // Format duration to human readable
   formatDuration(ms) {
     const seconds = Math.floor(ms / 1000);
     const minutes = Math.floor(seconds / 60);
@@ -307,7 +357,6 @@ class FFmpegCapture {
     return `${seconds}s`;
   }
 
-  // Legacy methods for compatibility (no longer used for MPEG-TS)
   getPlaylistPath() {
     return null;
   }

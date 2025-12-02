@@ -37,12 +37,41 @@ class TunerManager {
   startIdleCleanup() {
     setInterval(() => {
       for (const tuner of this.tuners) {
+        // Release idle streaming tuners
         if (tuner.state === TunerState.STREAMING && tuner.isIdle()) {
           console.log(`[tuner-manager] Tuner ${tuner.id} is idle, releasing...`);
           this.releaseTuner(tuner.id);
         }
+
+        // Auto-recover tuners stuck in ERROR state
+        if (tuner.state === TunerState.ERROR) {
+          console.log(`[tuner-manager] Tuner ${tuner.id} in ERROR state, attempting auto-recovery...`);
+          this.recoverTuner(tuner.id);
+        }
       }
-    }, 60000);  // Check every minute
+    }, 30000);  // Check every 30 seconds
+  }
+
+  // Attempt to recover a tuner from error state
+  async recoverTuner(tunerId) {
+    const tuner = this.getTuner(tunerId);
+    if (!tuner) return;
+
+    try {
+      // Stop any lingering processes
+      if (tuner.ffmpeg) {
+        try { tuner.ffmpeg.stop(); } catch (e) {}
+      }
+
+      // Reset state
+      tuner.state = TunerState.FREE;
+      tuner.currentChannel = null;
+      tuner.clients = 0;
+
+      console.log(`[tuner-manager] Tuner ${tunerId} recovered to FREE state`);
+    } catch (err) {
+      console.error(`[tuner-manager] Failed to recover tuner ${tunerId}:`, err.message);
+    }
   }
 
   // Find a tuner for the requested channel
@@ -176,10 +205,10 @@ class TunerManager {
   // Force release a tuner (stop streaming)
   async releaseTuner(tunerId) {
     const tuner = this.getTuner(tunerId);
-    if (tuner && tuner.state === TunerState.STREAMING) {
+    if (tuner && (tuner.state === TunerState.STREAMING || tuner.state === TunerState.ERROR || tuner.state === TunerState.TUNING)) {
       // Stop FFmpeg but keep Chrome running
       if (tuner.ffmpeg) {
-        tuner.ffmpeg.stop();
+        try { tuner.ffmpeg.stop(); } catch (e) {}
       }
       tuner.state = TunerState.FREE;
       tuner.currentChannel = null;

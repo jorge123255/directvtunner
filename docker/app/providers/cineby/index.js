@@ -175,11 +175,12 @@ class CinebyProvider extends BaseProvider {
   /**
    * Rewrite playlist URLs to route through proxy
    */
-  rewritePlaylistUrls(playlist, proxyBase) {
+  rewritePlaylistUrls(playlist, proxyBase, contentId = null, baseStreamUrl = null) {
     // Cineby uses relative URLs that need to be proxied
     // Pattern: /raindust78.online/file2/xyz.ts
 
     let rewritten = playlist;
+    const cidParam = contentId ? `?cid=${contentId}` : '';
 
     for (const pattern of config.segmentPatterns) {
       rewritten = rewritten.replace(pattern, (match, segment) => {
@@ -187,7 +188,7 @@ class CinebyProvider extends BaseProvider {
         const fullUrl = segment.startsWith('http') ? segment :
                        segment.startsWith('/') ? `https:/${segment}` : segment;
         const encoded = Buffer.from(fullUrl).toString('base64url');
-        return `${proxyBase}/segment/${encoded}`;
+        return `${proxyBase}/segment/${encoded}${cidParam}`;
       });
     }
 
