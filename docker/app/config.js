@@ -24,6 +24,7 @@ module.exports = {
 
   // Timing
   idleTimeout: 300000,  // 5 min before releasing idle tuner
+  ffmpegIdleTimeout: parseInt(process.env.DVR_FFMPEG_IDLE_TIMEOUT) || 30000,  // 30 sec before stopping FFmpeg when no clients
   channelSwitchDelay: 5000,  // Wait for video to start after navigation
   ffmpegStartDelay: 3000,  // Wait after FFmpeg starts before serving
 

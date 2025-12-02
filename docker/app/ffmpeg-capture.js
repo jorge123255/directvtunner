@@ -18,6 +18,11 @@ class FFmpegCapture {
     this.maxRestartAttempts = 5;
     this.restartDelay = 2000;
     this.stopping = false; // New flag to track stopping state
+    this.idleTimer = null; // Timer for idle timeout
+    this.idleTimeout = config.ffmpegIdleTimeout || 30000; // Default 30 seconds
+    this.useHwAccel = config.hwAccel; // Track current hw accel mode (can fallback to 'none')
+    this.hwAccelFailed = false; // Track if hw accel failed for this session
+    this.nvencErrorDetected = false; // Track if we saw actual NVENC errors (not just process kill)
 
     this.stats = {
       startTime: null,
@@ -25,7 +30,8 @@ class FFmpegCapture {
       framesProcessed: 0,
       errors: [],
       lastActivity: null,
-      restarts: 0
+      restarts: 0,
+      encoder: null // Track which encoder is actually being used
     };
   }
 
@@ -70,6 +76,12 @@ class FFmpegCapture {
     this.restartAttempts = 0;
     this.stopping = false;
 
+    // Always reset to try NVENC on new stream start
+    // The fallback only persists within a single stream session
+    this.hwAccelFailed = false;
+    this.nvencErrorDetected = false;
+    this.useHwAccel = config.hwAccel;
+
     const platform = config.getPlatform();
 
     this.broadcastStream = new PassThrough();
@@ -104,11 +116,13 @@ class FFmpegCapture {
       const audioBitrate = config.audioBitrate || '128k';
       const width = config.resolution?.width || 1280;
       const height = config.resolution?.height || 720;
-      const encoder = config.getEncoder();
-      const hwAccel = config.hwAccel;
+      // Use instance hwAccel which may have been downgraded from NVENC to none
+      const hwAccel = this.useHwAccel;
+      const encoder = hwAccel === 'nvenc' ? 'h264_nvenc' : (hwAccel === 'qsv' ? 'h264_qsv' : 'libx264');
 
       console.log(`[ffmpeg-${this.tunerId}] Using settings: ${width}x${height} @ ${videoBitrate} video, ${audioBitrate} audio`);
-      console.log(`[ffmpeg-${this.tunerId}] Encoder: ${encoder} (hwAccel: ${hwAccel})`);
+      console.log(`[ffmpeg-${this.tunerId}] Encoder: ${encoder} (hwAccel: ${hwAccel})${this.hwAccelFailed ? ' [NVENC failed, using fallback]' : ''}`);
+      this.stats.encoder = encoder;
 
       // Build video encoder arguments based on hardware acceleration
       let videoEncoderArgs;
@@ -209,9 +223,26 @@ class FFmpegCapture {
     }
 
     console.log(`[ffmpeg-${this.tunerId}] Starting MPEG-TS capture...`);
+    console.log(`[ffmpeg-${this.tunerId}] FFmpeg args: ffmpeg ${args.join(' ')}`);
+
+    // Set environment variables for FFmpeg
+    // PULSE_SERVER is needed for PulseAudio to connect properly in Docker
+    const ffmpegEnv = {
+      ...process.env,
+      DISPLAY: `:${displayNum}`,
+      PULSE_SERVER: 'unix:/var/run/pulse/native',
+    };
+
+    // Small delay before spawning FFmpeg to ensure GPU encoder is ready
+    // This helps with "hit or miss" NVENC initialization issues
+    if (this.useHwAccel === 'nvenc') {
+      console.log(`[ffmpeg-${this.tunerId}] Waiting 500ms for NVENC readiness...`);
+      await new Promise(r => setTimeout(r, 500));
+    }
 
     this.process = spawn('ffmpeg', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: ffmpegEnv,
     });
 
     this.process.stdout.on('data', (data) => {
@@ -242,6 +273,23 @@ class FFmpegCapture {
           this.stats.framesProcessed = parseInt(frameMatch[1]);
         }
       }
+      // Log encoder initialization - helps debug "hit or miss" GPU issues
+      if (msg.includes('h264_nvenc')) {
+        console.log(`[ffmpeg-${this.tunerId}] NVENC encoder initialized: ${msg.trim().substring(0, 200)}`);
+      }
+      if (msg.includes('libx264')) {
+        console.log(`[ffmpeg-${this.tunerId}] libx264 encoder initialized: ${msg.trim().substring(0, 200)}`);
+      }
+      // Log any CUDA/GPU-related messages
+      if (msg.includes('CUDA') || msg.includes('cuda') || msg.includes('GPU') || msg.includes('nvenc')) {
+        console.log(`[ffmpeg-${this.tunerId}] GPU: ${msg.trim().substring(0, 200)}`);
+      }
+      // Detect actual NVENC initialization failures
+      if (msg.includes('Cannot load') || msg.includes('No NVENC capable') ||
+          msg.includes('nvenc') && (msg.includes('error') || msg.includes('Error') || msg.includes('failed'))) {
+        console.error(`[ffmpeg-${this.tunerId}] NVENC ERROR DETECTED: ${msg.trim()}`);
+        this.nvencErrorDetected = true;
+      }
       if (msg.includes('Error') || msg.includes('error')) {
         console.error(`[ffmpeg-${this.tunerId}] ${msg}`);
         this.stats.errors.push({ time: Date.now(), message: msg.trim() });
@@ -252,10 +300,33 @@ class FFmpegCapture {
     });
 
     this.process.on('close', (code) => {
-      console.log(`[ffmpeg-${this.tunerId}] Process exited with code ${code}`);
+      const uptime = this.stats.startTime ? Date.now() - this.stats.startTime : 0;
+      console.log(`[ffmpeg-${this.tunerId}] Process exited with code ${code} after ${uptime}ms`);
       this.isRunning = false;
       this.process = null;
       this.stopping = false;
+
+      // Check if NVENC actually failed (not just killed) - only fallback if we saw real NVENC errors
+      // Code 255 is also returned on SIGTERM, so we need actual error detection
+      if (code !== 0 && uptime < 5000 && this.useHwAccel === 'nvenc' && !this.hwAccelFailed && this.nvencErrorDetected) {
+        console.warn(`[ffmpeg-${this.tunerId}] NVENC failed with actual errors (${uptime}ms), falling back to software encoding`);
+        this.hwAccelFailed = true;
+        this.useHwAccel = 'none';
+        this.restartAttempts = 0; // Reset restart attempts for fallback
+
+        if (this.shouldRestart || this.clients.length > 0) {
+          console.log(`[ffmpeg-${this.tunerId}] Restarting with libx264...`);
+          setTimeout(() => {
+            if (!this.isRunning) {
+              this.start(this.displayNum);
+            }
+          }, 500);
+          return;
+        }
+      }
+
+      // Reset NVENC error flag for next attempt
+      this.nvencErrorDetected = false;
 
       if (this.shouldRestart && this.clients.length > 0 && code !== 0) {
         this.restartAttempts++;
@@ -294,6 +365,9 @@ class FFmpegCapture {
   }
 
   addClient(res) {
+    // Cancel any pending idle timeout since we have a new client
+    this.cancelIdleTimer();
+
     this.clients.push(res);
     console.log(`[ffmpeg-${this.tunerId}] Client connected, ${this.clients.length} total`);
 
@@ -302,8 +376,55 @@ class FFmpegCapture {
       if (idx !== -1) {
         this.clients.splice(idx, 1);
         console.log(`[ffmpeg-${this.tunerId}] Client disconnected, ${this.clients.length} remaining`);
+
+        // Start idle timer if no clients remaining
+        if (this.clients.length === 0 && this.isRunning) {
+          this.startIdleTimer();
+        }
       }
     });
+  }
+
+  // Start the idle timer to stop FFmpeg after timeout
+  startIdleTimer() {
+    this.cancelIdleTimer(); // Clear any existing timer
+
+    console.log(`[ffmpeg-${this.tunerId}] No clients, starting ${this.idleTimeout / 1000}s idle timer to release GPU`);
+
+    this.idleTimer = setTimeout(() => {
+      if (this.clients.length === 0 && this.isRunning) {
+        console.log(`[ffmpeg-${this.tunerId}] Idle timeout reached, stopping FFmpeg to release GPU`);
+        this.stopForIdle();
+      }
+    }, this.idleTimeout);
+  }
+
+  // Cancel the idle timer (called when a client connects)
+  cancelIdleTimer() {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  // Stop FFmpeg due to idle timeout (different from regular stop)
+  stopForIdle() {
+    this.cancelIdleTimer();
+    this.shouldRestart = false; // Don't auto-restart
+    this.stopping = true;
+
+    if (this.process) {
+      console.log(`[ffmpeg-${this.tunerId}] Stopping capture (idle timeout)...`);
+      const proc = this.process;
+      proc.kill('SIGTERM');
+
+      setTimeout(() => {
+        if (proc && !proc.killed) {
+          proc.kill('SIGKILL');
+        }
+      }, 3000);
+    }
+    // Note: Don't clear clients here since there shouldn't be any
   }
 
   getClientCount() {
@@ -312,6 +433,7 @@ class FFmpegCapture {
 
   // New method: stop and wait for process to fully terminate
   async stopAndWait() {
+    this.cancelIdleTimer();
     this.shouldRestart = false;
     this.stopping = true;
 
@@ -352,6 +474,7 @@ class FFmpegCapture {
   }
 
   stop() {
+    this.cancelIdleTimer();
     this.shouldRestart = false;
     this.stopping = true;
 
@@ -394,7 +517,10 @@ class FFmpegCapture {
       errorCount: this.stats.errors.length,
       restarts: this.stats.restarts,
       lastActivity: this.stats.lastActivity,
-      healthy: this.isRunning && (Date.now() - (this.stats.lastActivity || 0)) < 5000
+      healthy: this.isRunning && (Date.now() - (this.stats.lastActivity || 0)) < 5000,
+      encoder: this.stats.encoder,
+      hwAccel: this.useHwAccel,
+      hwAccelFailed: this.hwAccelFailed
     };
   }
 

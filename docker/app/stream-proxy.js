@@ -621,7 +621,8 @@ app.get('/stream/:channelId', async (req, res) => {
     log('Starting MPEG-TS stream');
 
     // Pipe the MPEG-TS stream directly to the client
-    tuner.pipeToClient(res);
+    // This will restart FFmpeg if it was stopped due to idle timeout
+    await tuner.pipeToClient(res);
 
     // The connection will stay open until the client disconnects
     // or the tuner is released
