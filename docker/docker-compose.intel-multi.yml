@@ -15,15 +15,16 @@ services:
     hostname: dvr-tuner-intel
     restart: unless-stopped
     shm_size: '2gb'
-    privileged: true  # Required for intel_gpu_top monitoring
+    # privileged: true  # Optional: only needed for intel_gpu_top GPU monitoring in web UI
     devices:
       - /dev/dri:/dev/dri
     ports:
-      - "7070:7070"
-      - "6080:6080"
-      - "5901:5901"
+      - "7070:7070"   # DVR API
+      - "6080:6080"   # noVNC Tuner 0
+      - "6081:6081"   # noVNC Tuner 1
+      - "6082:6082"   # noVNC Tuner 2
     volumes:
-      - /home/gszulc/dvr-data:/data
+      - ./dvr-data:/data
     environment:
       - TZ=America/New_York
       - DISPLAY=:1

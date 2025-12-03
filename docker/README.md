@@ -329,7 +329,6 @@ For Intel CPUs with integrated graphics, use the VA-API accelerated image.
 # Single tuner
 docker run -d \
   --name dvr-tuner-intel \
-  --privileged \
   --device /dev/dri:/dev/dri \
   -p 7070:7070 \
   -p 6080:6080 \
@@ -340,7 +339,6 @@ docker run -d \
 # Multi-tuner (3 tuners)
 docker run -d \
   --name dvr-tuner-intel \
-  --privileged \
   --device /dev/dri:/dev/dri \
   -p 7070:7070 \
   -p 6080:6080 \
@@ -356,6 +354,8 @@ docker run -d \
 - Tuner 0: `http://YOUR_IP:6080`
 - Tuner 1: `http://YOUR_IP:6081`
 - Tuner 2: `http://YOUR_IP:6082`
+
+**Optional:** Add `--privileged` flag to enable GPU utilization monitoring in the web UI (uses `intel_gpu_top`). Without it, VA-API encoding still works fine.
 
 ### Docker Compose with Intel VA-API
 
@@ -373,7 +373,7 @@ The web GUI shows Intel GPU stats:
 - Video Engine Utilization (when streaming)
 - Render Device Path
 
-**Note:** `--privileged` flag is required for `intel_gpu_top` monitoring.
+**Note:** `--privileged` flag is optional - only needed for `intel_gpu_top` GPU utilization monitoring in the web UI. VA-API encoding works without it.
 
 ---
 
