@@ -625,6 +625,57 @@ Edit `app/channels.js` to add/modify channels:
 
 ---
 
+## Low Resource Mode (NAS / Synology / Weak Hardware)
+
+If you're experiencing high CPU usage, memory issues, or crashes on NAS devices or lower-powered hardware, use these environment variables to reduce resource usage:
+
+### Environment Variables
+
+| Variable | Effect |
+|----------|--------|
+| `DVR_LOW_RESOURCE_CHROME=true` | Reduces Chrome memory usage (~30-40% less RAM) |
+| `DVR_LOW_RESOURCE_FFMPEG=true` | Faster encoding, lower CPU (~20-30% less CPU) |
+
+You can use one or both depending on your needs.
+
+### What Each Mode Does
+
+**DVR_LOW_RESOURCE_CHROME=true:**
+- Disables extensions, plugins, and unused Chrome features
+- Reduces JavaScript memory allocation
+- Uses 1280x720 window instead of 1920x1080
+- Disables background processes
+
+**DVR_LOW_RESOURCE_FFMPEG=true:**
+- Uses `superfast` preset instead of `veryfast`
+- Reduces video to 720p @ 2Mbps (vs 1080p @ 4Mbps)
+- Disables B-frames and reduces reference frames
+- Lower audio bitrate (96k vs 128k)
+
+### Example: Full Low Resource Mode
+
+```bash
+docker run -d \
+  --name dvr-tuner \
+  -p 7070:7070 \
+  -p 6080:6080 \
+  -v ./dvr-data:/data \
+  -e DVR_LOW_RESOURCE_CHROME=true \
+  -e DVR_LOW_RESOURCE_FFMPEG=true \
+  -e DVR_NUM_TUNERS=1 \
+  --memory=2g \
+  sunnyside1/directvtuner:latest
+```
+
+### Additional Tips for NAS Users
+
+- **Use single tuner**: Set `DVR_NUM_TUNERS=1` (each tuner uses ~500MB-1GB RAM)
+- **Limit Docker memory**: Add `--memory=2g` to prevent runaway usage
+- **Use GPU acceleration if available**: Intel VA-API or NVIDIA significantly reduces CPU
+- **Reduce shm-size**: Add `--shm-size=512m` for single tuner
+
+---
+
 ## Troubleshooting
 
 ### Container won't start

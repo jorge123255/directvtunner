@@ -206,25 +206,47 @@ class FFmpegCapture {
         ];
       } else {
         // Software encoding (libx264)
-        videoEncoderArgs = [
-          '-c:v', 'libx264',
-          '-preset', 'veryfast',
-          '-tune', 'zerolatency',
-          '-profile:v', 'high',
-          '-level', '4.1',
-          '-pix_fmt', 'yuv420p',
-          '-crf', '23',
-          '-b:v', videoBitrate,
-          '-maxrate', videoBitrate,
-          '-bufsize', '2M',
-          '-g', '60',
-          '-keyint_min', '30',
-          '-bf', '2',
-          '-b_strategy', '1',
-          '-sc_threshold', '40',
-          '-refs', '3',
-          '-flags', '+cgop',
-        ];
+        if (config.lowResourceFFmpeg) {
+          // Low resource mode: faster encoding, less CPU
+          console.log(`[ffmpeg-${this.tunerId}] Low resource FFmpeg mode: superfast preset, reduced quality`);
+          videoEncoderArgs = [
+            '-c:v', 'libx264',
+            '-preset', 'superfast',
+            '-tune', 'zerolatency',
+            '-profile:v', 'main',
+            '-level', '4.0',
+            '-pix_fmt', 'yuv420p',
+            '-crf', '26',
+            '-b:v', videoBitrate,
+            '-maxrate', videoBitrate,
+            '-bufsize', '1M',
+            '-g', '60',
+            '-bf', '0',
+            '-refs', '1',
+            '-flags', '+cgop',
+          ];
+        } else {
+          // Standard quality settings (unchanged)
+          videoEncoderArgs = [
+            '-c:v', 'libx264',
+            '-preset', 'veryfast',
+            '-tune', 'zerolatency',
+            '-profile:v', 'high',
+            '-level', '4.1',
+            '-pix_fmt', 'yuv420p',
+            '-crf', '23',
+            '-b:v', videoBitrate,
+            '-maxrate', videoBitrate,
+            '-bufsize', '2M',
+            '-g', '60',
+            '-keyint_min', '30',
+            '-bf', '2',
+            '-b_strategy', '1',
+            '-sc_threshold', '40',
+            '-refs', '3',
+            '-flags', '+cgop',
+          ];
+        }
       }
 
       // Output format: HLS segments or MPEG-TS pipe

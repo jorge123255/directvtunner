@@ -5,10 +5,16 @@ const os = require('os');
 const isMac = os.platform() === 'darwin';
 const isLinux = os.platform() === 'linux';
 
+// Low resource mode for FFmpeg - reduces CPU usage for NAS and weak hardware
+const lowResourceFFmpeg = process.env.DVR_LOW_RESOURCE_FFMPEG === 'true';
+
 module.exports = {
   // Server settings
   port: parseInt(process.env.DVR_PORT) || 7070,
   host: process.env.DVR_HOST || '0.0.0.0',
+
+  // Low resource mode flag (FFmpeg only - Chrome has its own DVR_LOW_RESOURCE_CHROME)
+  lowResourceFFmpeg,
 
   // Tuner settings
   numTuners: parseInt(process.env.DVR_NUM_TUNERS) || 1,
@@ -28,13 +34,13 @@ module.exports = {
   channelSwitchDelay: 5000,  // Wait for video to start after navigation
   ffmpegStartDelay: 3000,  // Wait after FFmpeg starts before serving
 
-  // Video settings - 1080p for better quality
+  // Video settings - lower in low resource mode
   resolution: {
-    width: 1920,
-    height: 1080,
+    width: lowResourceFFmpeg ? 1280 : 1920,
+    height: lowResourceFFmpeg ? 720 : 1080,
   },
-  videoBitrate: '4M',
-  audioBitrate: '128k',
+  videoBitrate: lowResourceFFmpeg ? '2M' : '4M',
+  audioBitrate: lowResourceFFmpeg ? '96k' : '128k',
 
   // HLS settings (better for multiple clients watching same channel)
   hlsMode: process.env.DVR_HLS_MODE !== 'false', // Default true, set DVR_HLS_MODE=false to use MPEG-TS pipe
