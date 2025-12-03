@@ -104,6 +104,7 @@ COPY start-novnc.sh /usr/local/bin/start-novnc.sh
 COPY start-dvr.sh /usr/local/bin/start-dvr.sh
 COPY start-pulseaudio.sh /usr/local/bin/start-pulseaudio.sh
 COPY start-unclutter.sh /usr/local/bin/start-unclutter.sh
+COPY sync-chrome-profiles.sh /usr/local/bin/sync-chrome-profiles.sh
 RUN chmod +x /usr/local/bin/*.sh
 
 # Configure PulseAudio for system-wide mode
