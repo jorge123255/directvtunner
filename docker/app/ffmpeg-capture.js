@@ -32,6 +32,14 @@ class FFmpegCapture {
     this.hlsSegmentTime = config.hls?.segmentTime || 2;
     this.hlsListSize = config.hls?.listSize || 5;
 
+    // Segment size monitor for black screen detection
+    this.segmentMonitorInterval = null;
+    this.segmentMonitorEnabled = process.env.DVR_SEGMENT_MONITOR !== 'false'; // Default enabled
+    this.minSegmentSize = parseInt(process.env.DVR_MIN_SEGMENT_SIZE) || 50000; // 50KB threshold (black ~14KB, normal ~500KB)
+    this.smallSegmentCount = 0;
+    this.smallSegmentThreshold = parseInt(process.env.DVR_SMALL_SEGMENT_THRESHOLD) || 3; // 3 consecutive small segments triggers retune
+    this.onBlackScreenDetected = null; // Callback for black screen detection
+
     this.stats = {
       startTime: null,
       bytesTransferred: 0,
@@ -455,6 +463,15 @@ class FFmpegCapture {
 
     await new Promise(r => setTimeout(r, 500));
     console.log(`[ffmpeg-${this.tunerId}] MPEG-TS stream ready`);
+
+    // Start segment monitor after FFmpeg is running (with delay for first segments)
+    if (this.hlsMode && this.segmentMonitorEnabled) {
+      setTimeout(() => {
+        if (this.isRunning) {
+          this.startSegmentMonitor();
+        }
+      }, (this.hlsSegmentTime * 2 + 2) * 1000); // Wait for 2 segments + buffer
+    }
   }
 
   addClient(res) {
@@ -527,6 +544,7 @@ class FFmpegCapture {
   // New method: stop and wait for process to fully terminate
   async stopAndWait() {
     this.cancelIdleTimer();
+    this.stopSegmentMonitor();
     this.shouldRestart = false;
     this.stopping = true;
 
@@ -662,6 +680,7 @@ class FFmpegCapture {
 
   stop() {
     this.cancelIdleTimer();
+    this.stopSegmentMonitor();
     this.shouldRestart = false;
     this.stopping = true;
 
@@ -764,6 +783,106 @@ class FFmpegCapture {
 
   isHlsMode() {
     return this.hlsMode;
+  }
+
+  // Set callback for black screen detection
+  setBlackScreenCallback(callback) {
+    this.onBlackScreenDetected = callback;
+  }
+
+  // Start monitoring segment sizes for black screen detection
+  startSegmentMonitor() {
+    if (!this.hlsMode || !this.segmentMonitorEnabled) {
+      return;
+    }
+
+    this.stopSegmentMonitor(); // Clear any existing monitor
+    this.smallSegmentCount = 0;
+
+    // Check every segment interval (segment time + 1 second buffer)
+    const checkInterval = (this.hlsSegmentTime + 1) * 1000;
+
+    console.log(`[ffmpeg-${this.tunerId}] Starting segment size monitor (check every ${checkInterval/1000}s, min size: ${this.minSegmentSize} bytes)`);
+
+    this.segmentMonitorInterval = setInterval(() => {
+      this.checkSegmentSizes();
+    }, checkInterval);
+  }
+
+  // Stop the segment monitor
+  stopSegmentMonitor() {
+    if (this.segmentMonitorInterval) {
+      clearInterval(this.segmentMonitorInterval);
+      this.segmentMonitorInterval = null;
+    }
+    this.smallSegmentCount = 0;
+  }
+
+  // Check the latest segment sizes
+  checkSegmentSizes() {
+    if (!this.isRunning || !this.hlsMode) {
+      return;
+    }
+
+    try {
+      const files = fs.readdirSync(this.hlsDir)
+        .filter(f => f.endsWith('.ts'))
+        .map(f => ({
+          name: f,
+          path: path.join(this.hlsDir, f),
+          stat: fs.statSync(path.join(this.hlsDir, f))
+        }))
+        .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs); // Newest first
+
+      if (files.length === 0) {
+        return;
+      }
+
+      // Check the most recent segment
+      const latestSegment = files[0];
+      const segmentSize = latestSegment.stat.size;
+
+      if (segmentSize < this.minSegmentSize) {
+        this.smallSegmentCount++;
+        console.log(`[ffmpeg-${this.tunerId}] Small segment detected: ${latestSegment.name} = ${segmentSize} bytes (${this.smallSegmentCount}/${this.smallSegmentThreshold})`);
+
+        if (this.smallSegmentCount >= this.smallSegmentThreshold) {
+          console.warn(`[ffmpeg-${this.tunerId}] BLACK SCREEN DETECTED: ${this.smallSegmentCount} consecutive small segments`);
+          this.smallSegmentCount = 0; // Reset counter
+
+          // Trigger callback if set
+          if (this.onBlackScreenDetected) {
+            this.onBlackScreenDetected(this.tunerId);
+          }
+        }
+      } else {
+        // Reset counter on good segment
+        if (this.smallSegmentCount > 0) {
+          console.log(`[ffmpeg-${this.tunerId}] Good segment: ${latestSegment.name} = ${segmentSize} bytes, resetting counter`);
+        }
+        this.smallSegmentCount = 0;
+      }
+
+      // Update stats with latest segment info
+      this.stats.latestSegmentSize = segmentSize;
+      this.stats.latestSegmentName = latestSegment.name;
+
+    } catch (err) {
+      console.error(`[ffmpeg-${this.tunerId}] Segment monitor error: ${err.message}`);
+    }
+  }
+
+  // Get segment monitor status
+  getSegmentMonitorStatus() {
+    return {
+      enabled: this.segmentMonitorEnabled,
+      running: this.segmentMonitorInterval !== null,
+      minSegmentSize: this.minSegmentSize,
+      smallSegmentCount: this.smallSegmentCount,
+      smallSegmentThreshold: this.smallSegmentThreshold,
+      latestSegmentSize: this.stats.latestSegmentSize || null,
+      latestSegmentName: this.stats.latestSegmentName || null
+    };
   }
 }
 

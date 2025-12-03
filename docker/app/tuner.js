@@ -74,6 +74,12 @@ class Tuner {
       // Create FFmpeg capture instance
       this.ffmpeg = new FFmpegCapture(this.id, this.outputDir);
 
+      // Set up black screen detection callback for auto-retune
+      this.ffmpeg.setBlackScreenCallback(async (tunerId) => {
+        console.log(`[tuner-${tunerId}] Black screen callback triggered, attempting auto-retune...`);
+        await this.handleBlackScreen();
+      });
+
       this.state = TunerState.FREE;
       console.log(`[tuner-${this.id}] Ready (free)`);
     } catch (err) {
@@ -963,6 +969,7 @@ class Tuner {
       lastActivity: this.lastActivity,
       debugPort: this.debugPort,
       stream: this.ffmpeg ? this.ffmpeg.getStats() : null,
+      segmentMonitor: this.ffmpeg ? this.ffmpeg.getSegmentMonitorStatus() : null,
     };
   }
 
@@ -997,6 +1004,32 @@ class Tuner {
   // Check if streaming is active
   isStreaming() {
     return this.ffmpeg && this.ffmpeg.isRunning;
+  }
+
+  // Handle black screen detection - auto-retune to the same channel
+  async handleBlackScreen() {
+    if (!this.currentChannel) {
+      console.log(`[tuner-${this.id}] No current channel to retune to`);
+      return;
+    }
+
+    const channel = this.currentChannel;
+    console.log(`[tuner-${this.id}] Auto-retuning to ${channel} due to black screen...`);
+
+    try {
+      // Re-tune to the same channel (this will stop FFmpeg, navigate, and restart)
+      await this.tuneToChannel(channel);
+      console.log(`[tuner-${this.id}] Auto-retune to ${channel} completed successfully`);
+    } catch (err) {
+      console.error(`[tuner-${this.id}] Auto-retune failed: ${err.message}`);
+      // Mark tuner as error so it can be recovered by tuner-manager
+      this.state = TunerState.ERROR;
+    }
+  }
+
+  // Get segment monitor status (for API/debugging)
+  getSegmentMonitorStatus() {
+    return this.ffmpeg ? this.ffmpeg.getSegmentMonitorStatus() : null;
   }
 }
 
