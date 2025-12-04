@@ -756,6 +756,37 @@ The image runs via Rosetta emulation on Apple Silicon Macs. This works but adds 
 - Use **1-2 tuners** maximum
 - Consider **720p** resolution for smoother performance
 
+### Adding More Tuners on Mac
+
+To run multiple tuners, you need to:
+1. Increase Docker Desktop memory (see table above)
+2. Set `DVR_TUNER_COUNT` environment variable
+3. Expose additional noVNC ports (6081, 6082, etc.)
+
+**Example: 3 Tuners on Mac**
+
+```bash
+docker run -d \
+  --name directv-tuner \
+  --platform linux/amd64 \
+  -p 7070:7070 \
+  -p 6080:6080 \
+  -p 6081:6081 \
+  -p 6082:6082 \
+  -v directv-data:/data \
+  -e DVR_TUNER_COUNT=3 \
+  -e TZ=America/New_York \
+  --shm-size=2g \
+  sunnyside1/directvtuner:latest
+```
+
+**Login to each tuner via noVNC:**
+- Tuner 0: http://localhost:6080
+- Tuner 1: http://localhost:6081
+- Tuner 2: http://localhost:6082
+
+Each tuner requires a separate DirecTV login session.
+
 ### Docker Compose Example for Mac
 
 ```yaml
@@ -764,13 +795,16 @@ services:
   directv-tuner:
     image: sunnyside1/directvtuner:latest
     container_name: directv-tuner
+    platform: linux/amd64
     ports:
       - "7070:7070"
       - "6080:6080"
+      - "6081:6081"
+      - "6082:6082"
     volumes:
       - directv-data:/data
     environment:
-      - DVR_TUNER_COUNT=2
+      - DVR_TUNER_COUNT=3
       - TZ=America/New_York
     shm_size: 2g
     restart: unless-stopped
