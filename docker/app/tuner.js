@@ -397,7 +397,10 @@ class Tuner {
             for (const link of channelLinks) {
               const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
               if (ariaLabel.includes(termLower)) {
+                link.scrollIntoView({ behavior: 'instant', block: 'center' });
+                link.focus();
                 link.click();
+                link.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
                 return { clicked: true, method: `searchTerm "${termLower}" in "${ariaLabel}"` };
               }
             }
@@ -411,7 +414,10 @@ class Tuner {
           for (const link of channelLinks) {
             const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
             if (ariaLabel.includes(paddedPattern)) {
+              link.scrollIntoView({ behavior: 'instant', block: 'center' });
+              link.focus();
               link.click();
+              link.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
               return { clicked: true, method: `padded channel number ${paddedNumber} in "${ariaLabel}"` };
             }
           }
@@ -421,32 +427,43 @@ class Tuner {
             for (const link of channelLinks) {
               const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
               if (ariaLabel.includes(numberPattern)) {
+                link.scrollIntoView({ behavior: 'instant', block: 'center' });
+                link.focus();
                 link.click();
+                link.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
                 return { clicked: true, method: `channel number ${number} in "${ariaLabel}"` };
               }
             }
           }
         }
 
-        // Priority 3: Try exact name match
+        // Priority 3: Try exact name match - check if aria-label ends with the name
+        // or has the name as a word (not substring of another word)
         const exactName = name.toLowerCase();
         for (const link of channelLinks) {
           const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
-          if (ariaLabel.includes(exactName)) {
+          // Check if name appears at end of aria-label OR as whole word with space before it
+          if (ariaLabel.endsWith(exactName) || ariaLabel.includes(' ' + exactName + ' ') || ariaLabel.includes(' ' + exactName)) {
+            link.scrollIntoView({ behavior: 'instant', block: 'center' });
+            link.focus();
             link.click();
+            link.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
             return { clicked: true, method: `exact name "${exactName}" in "${ariaLabel}"` };
           }
         }
 
         // Priority 4 (last resort): Try first word of name
-        // But ONLY if first word is unique enough (longer than 3 chars and not common)
+        // But ONLY if first word is unique enough (3+ chars and not common)
         const firstWord = name.split(' ')[0].toLowerCase();
-        const commonWords = ['the', 'fox', 'nbc', 'cbs', 'abc', 'cnn'];  // Skip common network prefixes
-        if (firstWord.length > 3 && !commonWords.includes(firstWord)) {
+        const commonWords = ['the', 'fox', 'nbc', 'cbs', 'abc', 'cnn', 'hbo', 'tbs', 'tnt', 'usa', 'amc', 'bet'];  // Skip common network prefixes
+        if (firstWord.length >= 3 && !commonWords.includes(firstWord)) {
           for (const link of channelLinks) {
             const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
             if (ariaLabel.includes(firstWord)) {
+              link.scrollIntoView({ behavior: 'instant', block: 'center' });
+              link.focus();
               link.click();
+              link.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
               return { clicked: true, method: `first word "${firstWord}" in "${ariaLabel}"` };
             }
           }
@@ -480,18 +497,24 @@ class Tuner {
               for (const link of channelLinks) {
                 const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
                 if (ariaLabel.includes(numberPattern)) {
+                  link.scrollIntoView({ behavior: 'instant', block: 'center' });
+                  link.focus();
                   link.click();
+                  link.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
                   return { clicked: true, method: `scroll: channel ${number}` };
                 }
               }
             }
 
-            // Priority 2: Exact name
+            // Priority 2: Exact name - check if aria-label ends with name or has it as a whole word
             const exactName = name.toLowerCase();
             for (const link of channelLinks) {
               const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
-              if (ariaLabel.includes(exactName)) {
+              if (ariaLabel.endsWith(exactName) || ariaLabel.includes(' ' + exactName + ' ') || ariaLabel.includes(' ' + exactName)) {
+                link.scrollIntoView({ behavior: 'instant', block: 'center' });
+                link.focus();
                 link.click();
+                link.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
                 return { clicked: true, method: `scroll: exact name "${exactName}"` };
               }
             }
@@ -503,7 +526,10 @@ class Tuner {
                 for (const link of channelLinks) {
                   const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
                   if (ariaLabel.includes(termLower)) {
+                    link.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    link.focus();
                     link.click();
+                    link.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
                     return { clicked: true, method: `scroll: searchTerm "${termLower}"` };
                   }
                 }

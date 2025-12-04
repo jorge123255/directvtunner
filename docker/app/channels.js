@@ -147,7 +147,7 @@ const channels = [
   { id: 'grit', name: 'GRIT', number: '81', category: 'Entertainment' },
   { id: 'metv', name: 'MeTV', number: '77', category: 'Entertainment' },
   { id: 'cozi', name: 'Cozi TV', number: '80', category: 'Entertainment' },
-  { id: 'get-tv', name: 'getTV', number: '83', category: 'Entertainment' },
+  { id: 'get-tv', name: 'getTV', number: '83', category: 'Entertainment', searchTerms: ['GET'] },
   { id: 'heroes-icons', name: 'Heroes & Icons', number: '385', category: 'Entertainment' },
   { id: 'comedy-tv', name: 'Comedy TV', number: '382', category: 'Entertainment' },
   { id: 'justice-central', name: 'Justice Central', number: '383', category: 'Entertainment' },
