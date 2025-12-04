@@ -680,6 +680,107 @@ docker run -d \
 
 ---
 
+## Running on Mac (Docker Desktop)
+
+### Important: Configure Docker Desktop Resources
+
+Docker Desktop for Mac runs containers in a lightweight VM with **limited default resources** (2GB RAM). The DirecTV Tuner requires more resources, especially when running multiple tuners.
+
+### Minimum Requirements
+
+| Tuners | RAM | CPU |
+|--------|-----|-----|
+| 1 | 4GB | 2 cores |
+| 2 | 6GB | 4 cores |
+| 3 | 8GB | 4 cores |
+
+### How to Increase Docker Desktop Resources
+
+1. Click the **Docker Desktop icon** in your menu bar
+2. Select **Settings** (gear icon)
+3. Go to **Resources** → **Advanced**
+4. Adjust the sliders:
+   - **Memory**: Set to at least **6GB** (8GB recommended)
+   - **CPUs**: Set to at least **4 cores**
+   - **Swap**: Set to **2GB**
+5. Click **Apply & Restart**
+
+### Recommended Docker Run Command for Mac
+
+```bash
+docker run -d \
+  --name directv-tuner \
+  -p 7070:7070 \
+  -p 6080:6080 \
+  -v directv-data:/data \
+  -e DVR_TUNER_COUNT=2 \
+  -e TZ=America/New_York \
+  --shm-size=2g \
+  sunnyside1/directvtuner:latest
+```
+
+**Key settings:**
+- `--shm-size=2g` - **Critical!** Chrome uses shared memory. Default 64MB causes crashes.
+- `DVR_TUNER_COUNT=2` - Start with 2 tuners. Increase only if you have 8GB+ allocated.
+
+### Troubleshooting Mac Issues
+
+#### "Aw, Snap!" Error Code 9
+**Cause:** Chrome crashed due to insufficient memory.
+
+**Fix:**
+1. Increase Docker Desktop memory to 8GB
+2. Add `--shm-size=2g` to your docker run command
+3. Reduce tuner count: `-e DVR_TUNER_COUNT=1`
+
+#### "Failed to establish connection to Chrome"
+**Cause:** Chrome process died or ran out of resources.
+
+**Fix:**
+1. Restart the container: `docker restart directv-tuner`
+2. If persistent, increase Docker resources and reduce tuner count
+
+#### Slow/Choppy Playback
+**Cause:** Software encoding (libx264) is CPU-intensive on Mac.
+
+**Fix:**
+1. Allocate more CPU cores in Docker Desktop (4+ recommended)
+2. Reduce resolution in Settings → Encoding → set to 720p
+3. Use only 1-2 tuners
+
+### Apple Silicon (M1/M2/M3) Notes
+
+The image runs via Rosetta emulation on Apple Silicon Macs. This works but adds ~10-15% CPU overhead. Recommendations:
+
+- Allocate at least **4 CPU cores**
+- Use **1-2 tuners** maximum
+- Consider **720p** resolution for smoother performance
+
+### Docker Compose Example for Mac
+
+```yaml
+version: '3.8'
+services:
+  directv-tuner:
+    image: sunnyside1/directvtuner:latest
+    container_name: directv-tuner
+    ports:
+      - "7070:7070"
+      - "6080:6080"
+    volumes:
+      - directv-data:/data
+    environment:
+      - DVR_TUNER_COUNT=2
+      - TZ=America/New_York
+    shm_size: 2g
+    restart: unless-stopped
+
+volumes:
+  directv-data:
+```
+
+---
+
 ## Troubleshooting
 
 ### Container won't start
