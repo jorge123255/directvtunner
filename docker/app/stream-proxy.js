@@ -37,6 +37,11 @@ const { getPresets, getPreset } = require('./presets');
 
 const app = express();
 
+// Auto-sync tracking
+let profileSyncedAfterLogin = false;
+let lastLoginCheckTime = 0;
+const LOGIN_CHECK_INTERVAL = 5000; // Check every 5 seconds
+
 // JSON body parsing for settings API
 app.use(express.json());
 
@@ -917,152 +922,196 @@ app.post('/api/tuner/:tunerId/clear-cache', async (req, res) => {
   }
 });
 
-// Sync Chrome profile from tuner 0 to all other tuners (share login session)
-app.post('/api/sync-profiles', async (req, res) => {
+// Helper function to sync Chrome profiles (used by API and auto-sync)
+async function syncChromeProfiles() {
   const numTuners = parseInt(process.env.DVR_NUM_TUNERS) || 1;
 
   if (numTuners <= 1) {
-    return res.json({ success: true, message: 'Only 1 tuner configured, nothing to sync' });
+    return { success: true, message: 'Only 1 tuner configured, nothing to sync' };
   }
 
-  try {
-    const { execSync, spawn } = require('child_process');
-    const fs = require('fs');
-    const sourceProfile = '/data/chrome-profile-0';
+  const { execSync, spawn } = require('child_process');
+  const sourceProfile = '/data/chrome-profile-0';
 
-    // Check if source profile exists
-    if (!fs.existsSync(sourceProfile)) {
-      return res.status(400).json({
-        error: 'Source profile not found',
-        message: 'Please log in to tuner 0 first (via noVNC on port 6080)'
-      });
+  // Check if source profile exists
+  if (!fs.existsSync(sourceProfile)) {
+    return { success: false, error: 'Source profile not found' };
+  }
+
+  // Check if cookies exist (login data)
+  if (!fs.existsSync(`${sourceProfile}/Default/Cookies`)) {
+    return { success: false, error: 'No login data found in tuner 0' };
+  }
+
+  console.log(`[server] Syncing Chrome profile from tuner 0 to tuners 1-${numTuners - 1}...`);
+
+  // Stop Chrome for tuners 1+ before copying
+  for (let i = 1; i < numTuners; i++) {
+    try {
+      execSync(`pkill -9 -f "chrome-profile-${i}"`, { timeout: 5000 });
+    } catch (e) {
+      // Chrome might not be running
+    }
+  }
+
+  // Wait for Chrome to stop
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  // Copy ONLY auth-related files (not the whole profile) to each tuner
+  const authFiles = [
+    'Default/Cookies',
+    'Default/Cookies-journal',
+    'Default/Login Data',
+    'Default/Login Data-journal',
+    'Default/Web Data',
+    'Default/Web Data-journal'
+  ];
+  const authDirs = [
+    'Default/Local Storage',
+    'Default/Session Storage',
+    'Default/IndexedDB'
+  ];
+
+  for (let i = 1; i < numTuners; i++) {
+    const targetProfile = `/data/chrome-profile-${i}`;
+
+    // Create target profile and Default directory if they don't exist
+    if (!fs.existsSync(targetProfile)) {
+      fs.mkdirSync(targetProfile, { recursive: true });
+    }
+    if (!fs.existsSync(`${targetProfile}/Default`)) {
+      fs.mkdirSync(`${targetProfile}/Default`, { recursive: true });
     }
 
-    console.log(`[server] Syncing Chrome profile from tuner 0 to tuners 1-${numTuners - 1}...`);
-
-    // Stop Chrome for tuners 1+ before copying
-    for (let i = 1; i < numTuners; i++) {
-      try {
-        execSync(`pkill -9 -f "chrome-profile-${i}"`, { timeout: 5000 });
-      } catch (e) {
-        // Chrome might not be running
-      }
-    }
-
-    // Wait for Chrome to stop
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Copy ONLY auth-related files (not the whole profile) to each tuner
-    // This preserves each tuner's independent session/tab state
-    const authFiles = [
-      'Default/Cookies',
-      'Default/Cookies-journal',
-      'Default/Login Data',
-      'Default/Login Data-journal',
-      'Default/Web Data',
-      'Default/Web Data-journal'
-    ];
-    const authDirs = [
-      'Default/Local Storage',
-      'Default/Session Storage',
-      'Default/IndexedDB'
-    ];
-
-    for (let i = 1; i < numTuners; i++) {
-      const targetProfile = `/data/chrome-profile-${i}`;
-
-      // Create target profile and Default directory if they don't exist
-      if (!fs.existsSync(targetProfile)) {
-        fs.mkdirSync(targetProfile, { recursive: true });
-      }
-      if (!fs.existsSync(`${targetProfile}/Default`)) {
-        fs.mkdirSync(`${targetProfile}/Default`, { recursive: true });
-      }
-
-      // Copy auth files
-      for (const file of authFiles) {
-        const src = `${sourceProfile}/${file}`;
-        const dst = `${targetProfile}/${file}`;
-        if (fs.existsSync(src)) {
-          try {
-            execSync(`cp "${src}" "${dst}"`, { timeout: 5000 });
-          } catch (e) {
-            console.log(`[server] Warning: Could not copy ${file}`);
-          }
-        }
-      }
-
-      // Copy auth directories
-      for (const dir of authDirs) {
-        const src = `${sourceProfile}/${dir}`;
-        const dst = `${targetProfile}/${dir}`;
-        if (fs.existsSync(src)) {
-          try {
-            execSync(`rm -rf "${dst}" && cp -r "${src}" "${dst}"`, { timeout: 10000 });
-          } catch (e) {
-            console.log(`[server] Warning: Could not copy ${dir}`);
-          }
-        }
-      }
-
-      // Remove lock files
-      const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
-      for (const lock of lockFiles) {
+    // Copy auth files
+    for (const file of authFiles) {
+      const src = `${sourceProfile}/${file}`;
+      const dst = `${targetProfile}/${file}`;
+      if (fs.existsSync(src)) {
         try {
-          fs.unlinkSync(`${targetProfile}/${lock}`);
-        } catch (e) {}
+          execSync(`cp "${src}" "${dst}"`, { timeout: 5000 });
+        } catch (e) {
+          console.log(`[server] Warning: Could not copy ${file}`);
+        }
       }
-
-      console.log(`[server] Copied auth files to tuner ${i}`);
     }
 
-    // Restart Chrome for tuners 1+
-    for (let i = 1; i < numTuners; i++) {
-      const debugPort = 9222 + i;
-      const displayNum = i + 1;
-      const profileDir = `/data/chrome-profile-${i}`;
-
-      const chromeArgs = [
-        `--remote-debugging-port=${debugPort}`,
-        '--remote-debugging-address=0.0.0.0',
-        `--user-data-dir=${profileDir}`,
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-background-networking',
-        '--disable-sync',
-        '--disable-translate',
-        '--disable-gpu',
-        '--window-size=1920,1080',
-        '--window-position=0,0',
-        '--kiosk',
-        '--autoplay-policy=no-user-gesture-required',
-        '--disable-dev-shm-usage',
-        '--no-sandbox',
-        '--alsa-output-device=pulse',
-        'https://stream.directv.com'
-      ];
-
-      const chrome = spawn('/usr/bin/google-chrome-stable', chromeArgs, {
-        env: {
-          ...process.env,
-          DISPLAY: `:${displayNum}`,
-          PULSE_SERVER: 'unix:/run/pulse/native',
-          PULSE_SINK: `virtual_speaker_${i}`
-        },
-        detached: true,
-        stdio: 'ignore'
-      });
-      chrome.unref();
-
-      console.log(`[server] Restarted Chrome for tuner ${i}`);
+    // Copy auth directories
+    for (const dir of authDirs) {
+      const src = `${sourceProfile}/${dir}`;
+      const dst = `${targetProfile}/${dir}`;
+      if (fs.existsSync(src)) {
+        try {
+          execSync(`rm -rf "${dst}" && cp -r "${src}" "${dst}"`, { timeout: 10000 });
+        } catch (e) {
+          console.log(`[server] Warning: Could not copy ${dir}`);
+        }
+      }
     }
 
-    res.json({
-      success: true,
-      message: `Profile synced to ${numTuners - 1} tuner(s). All tuners should now be logged in!`
+    // Remove lock files
+    const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+    for (const lock of lockFiles) {
+      try {
+        fs.unlinkSync(`${targetProfile}/${lock}`);
+      } catch (e) {}
+    }
+
+    console.log(`[server] Copied auth files to tuner ${i}`);
+  }
+
+  // Restart Chrome for tuners 1+
+  for (let i = 1; i < numTuners; i++) {
+    const debugPort = 9222 + i;
+    const displayNum = i + 1;
+    const profileDir = `/data/chrome-profile-${i}`;
+
+    const chromeArgs = [
+      `--remote-debugging-port=${debugPort}`,
+      '--remote-debugging-address=0.0.0.0',
+      `--user-data-dir=${profileDir}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--disable-translate',
+      '--disable-gpu',
+      '--window-size=1920,1080',
+      '--window-position=0,0',
+      '--kiosk',
+      '--autoplay-policy=no-user-gesture-required',
+      '--disable-dev-shm-usage',
+      '--no-sandbox',
+      '--alsa-output-device=pulse',
+      'https://stream.directv.com'
+    ];
+
+    const chrome = spawn('/usr/bin/google-chrome-stable', chromeArgs, {
+      env: {
+        ...process.env,
+        DISPLAY: `:${displayNum}`,
+        PULSE_SERVER: 'unix:/run/pulse/native',
+        PULSE_SINK: `virtual_speaker_${i}`
+      },
+      detached: true,
+      stdio: 'ignore'
     });
+    chrome.unref();
+
+    console.log(`[server] Restarted Chrome for tuner ${i} on display :${displayNum}`);
+  }
+
+  return { success: true, message: `Profile synced to ${numTuners - 1} tuner(s). All tuners should now be logged in!` };
+}
+
+// Auto-sync login when tuner 0 logs in
+async function checkAndAutoSyncLogin() {
+  const numTuners = parseInt(process.env.DVR_NUM_TUNERS) || 1;
+  if (numTuners <= 1 || profileSyncedAfterLogin) return;
+
+  const now = Date.now();
+  if (now - lastLoginCheckTime < LOGIN_CHECK_INTERVAL) return;
+  lastLoginCheckTime = now;
+
+  try {
+    const tuner = tunerManager.getTuner(0);
+    if (!tuner || !tuner.page) return;
+
+    const url = tuner.page.url();
+    const isLoggedIn = url.includes("stream.directv.com") && !url.includes("login") && !url.includes("signin") && !url.includes("auth");
+
+    if (isLoggedIn) {
+      // Check if cookies exist
+      const sourceProfile = '/data/chrome-profile-0';
+      if (fs.existsSync(`${sourceProfile}/Default/Cookies`)) {
+        console.log('[server] Login detected on tuner 0, auto-syncing profiles to other tuners...');
+        const result = await syncChromeProfiles();
+        if (result.success) {
+          profileSyncedAfterLogin = true;
+          console.log('[server] Auto-sync complete:', result.message);
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore errors during auto-check
+  }
+}
+
+// Start auto-sync checker
+setInterval(checkAndAutoSyncLogin, LOGIN_CHECK_INTERVAL);
+
+// Sync Chrome profile from tuner 0 to all other tuners (share login session)
+app.post('/api/sync-profiles', async (req, res) => {
+  try {
+    const result = await syncChromeProfiles();
+    if (result.success) {
+      profileSyncedAfterLogin = true;
+      res.json(result);
+    } else {
+      res.status(400).json(result);
+    }
   } catch (err) {
-    console.error('[server] Failed to sync profiles:', err.message);
+    console.error('[server] Profile sync failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
